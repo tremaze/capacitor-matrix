@@ -76,5 +76,8 @@
     "android": {
       "src": "android"
     }
+  },
+  "dependencies": {
+    "matrix-js-sdk": "^41.1.0"
   }
 }
