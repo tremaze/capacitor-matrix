@@ -1,15 +1,25 @@
 package de.tremaze.capacitor.matrix
 
+import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 @CapacitorPlugin(name = "Matrix")
 class MatrixPlugin : Plugin() {
 
-    private val bridge = MatrixSDKBridge()
+    private lateinit var bridge: MatrixSDKBridge
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    override fun load() {
+        bridge = MatrixSDKBridge(context)
+    }
 
     @PluginMethod
     fun login(call: PluginCall) {
@@ -17,11 +27,13 @@ class MatrixPlugin : Plugin() {
         val userId = call.getString("userId") ?: return call.reject("Missing userId")
         val password = call.getString("password") ?: return call.reject("Missing password")
 
-        try {
-            val session = bridge.login(homeserverUrl, userId, password)
-            call.resolve(session.toJSObject())
-        } catch (e: Exception) {
-            call.reject(e.message ?: "Login failed", e)
+        scope.launch {
+            try {
+                val session = bridge.login(homeserverUrl, userId, password)
+                call.resolve(session.toJSObject())
+            } catch (e: Exception) {
+                call.reject(e.message ?: "Login failed", e)
+            }
         }
     }
 
@@ -32,21 +44,25 @@ class MatrixPlugin : Plugin() {
         val userId = call.getString("userId") ?: return call.reject("Missing userId")
         val deviceId = call.getString("deviceId") ?: return call.reject("Missing deviceId")
 
-        try {
-            val session = bridge.loginWithToken(homeserverUrl, accessToken, userId, deviceId)
-            call.resolve(session.toJSObject())
-        } catch (e: Exception) {
-            call.reject(e.message ?: "Login with token failed", e)
+        scope.launch {
+            try {
+                val session = bridge.loginWithToken(homeserverUrl, accessToken, userId, deviceId)
+                call.resolve(session.toJSObject())
+            } catch (e: Exception) {
+                call.reject(e.message ?: "Login with token failed", e)
+            }
         }
     }
 
     @PluginMethod
     fun logout(call: PluginCall) {
-        try {
-            bridge.logout()
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject(e.message ?: "Logout failed", e)
+        scope.launch {
+            try {
+                bridge.logout()
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "Logout failed", e)
+            }
         }
     }
 
@@ -66,34 +82,42 @@ class MatrixPlugin : Plugin() {
 
     @PluginMethod
     fun startSync(call: PluginCall) {
-        try {
-            bridge.startSync(
-                onSyncState = { state ->
-                    notifyListeners("syncStateChange", JSObject().put("state", state))
-                },
-                onMessage = { event ->
-                    notifyListeners("messageReceived", JSObject().put("event", JSObject(event.toString())))
-                },
-                onRoomUpdate = { roomId, summary ->
-                    notifyListeners(
-                        "roomUpdated",
-                        JSObject().put("roomId", roomId).put("summary", JSObject(summary.toString())),
-                    )
-                },
-            )
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject(e.message ?: "startSync failed", e)
+        scope.launch {
+            try {
+                bridge.startSync(
+                    onSyncState = { state ->
+                        notifyListeners("syncStateChange", JSObject().put("state", state))
+                    },
+                    onMessage = { event ->
+                        val jsEvent = JSObject()
+                        event.forEach { (key, value) -> jsEvent.put(key, value) }
+                        notifyListeners("messageReceived", JSObject().put("event", jsEvent))
+                    },
+                    onRoomUpdate = { roomId, summary ->
+                        val jsSummary = JSObject()
+                        summary.forEach { (key, value) -> jsSummary.put(key, value) }
+                        notifyListeners(
+                            "roomUpdated",
+                            JSObject().put("roomId", roomId).put("summary", jsSummary),
+                        )
+                    },
+                )
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "startSync failed", e)
+            }
         }
     }
 
     @PluginMethod
     fun stopSync(call: PluginCall) {
-        try {
-            bridge.stopSync()
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject(e.message ?: "stopSync failed", e)
+        scope.launch {
+            try {
+                bridge.stopSync()
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "stopSync failed", e)
+            }
         }
     }
 
@@ -110,8 +134,14 @@ class MatrixPlugin : Plugin() {
     @PluginMethod
     fun getRooms(call: PluginCall) {
         try {
-            bridge.getRooms()
-            call.resolve()
+            val rooms = bridge.getRooms()
+            val jsRooms = JSArray()
+            rooms.forEach { room ->
+                val jsRoom = JSObject()
+                room.forEach { (key, value) -> jsRoom.put(key, value) }
+                jsRooms.put(jsRoom)
+            }
+            call.resolve(JSObject().put("rooms", jsRooms))
         } catch (e: Exception) {
             call.reject(e.message ?: "getRooms failed", e)
         }
@@ -121,11 +151,19 @@ class MatrixPlugin : Plugin() {
     fun getRoomMembers(call: PluginCall) {
         val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
 
-        try {
-            bridge.getRoomMembers(roomId)
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject(e.message ?: "getRoomMembers failed", e)
+        scope.launch {
+            try {
+                val members = bridge.getRoomMembers(roomId)
+                val jsMembers = JSArray()
+                members.forEach { member ->
+                    val jsMember = JSObject()
+                    member.forEach { (key, value) -> jsMember.put(key, value) }
+                    jsMembers.put(jsMember)
+                }
+                call.resolve(JSObject().put("members", jsMembers))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "getRoomMembers failed", e)
+            }
         }
     }
 
@@ -133,11 +171,13 @@ class MatrixPlugin : Plugin() {
     fun joinRoom(call: PluginCall) {
         val roomIdOrAlias = call.getString("roomIdOrAlias") ?: return call.reject("Missing roomIdOrAlias")
 
-        try {
-            val roomId = bridge.joinRoom(roomIdOrAlias)
-            call.resolve(JSObject().put("roomId", roomId))
-        } catch (e: Exception) {
-            call.reject(e.message ?: "joinRoom failed", e)
+        scope.launch {
+            try {
+                val roomId = bridge.joinRoom(roomIdOrAlias)
+                call.resolve(JSObject().put("roomId", roomId))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "joinRoom failed", e)
+            }
         }
     }
 
@@ -145,11 +185,13 @@ class MatrixPlugin : Plugin() {
     fun leaveRoom(call: PluginCall) {
         val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
 
-        try {
-            bridge.leaveRoom(roomId)
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject(e.message ?: "leaveRoom failed", e)
+        scope.launch {
+            try {
+                bridge.leaveRoom(roomId)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "leaveRoom failed", e)
+            }
         }
     }
 
@@ -159,11 +201,13 @@ class MatrixPlugin : Plugin() {
         val body = call.getString("body") ?: return call.reject("Missing body")
         val msgtype = call.getString("msgtype") ?: "m.text"
 
-        try {
-            val eventId = bridge.sendMessage(roomId, body, msgtype)
-            call.resolve(JSObject().put("eventId", eventId))
-        } catch (e: Exception) {
-            call.reject(e.message ?: "sendMessage failed", e)
+        scope.launch {
+            try {
+                val eventId = bridge.sendMessage(roomId, body, msgtype)
+                call.resolve(JSObject().put("eventId", eventId))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "sendMessage failed", e)
+            }
         }
     }
 
@@ -173,11 +217,23 @@ class MatrixPlugin : Plugin() {
         val limit = call.getInt("limit")
         val from = call.getString("from")
 
-        try {
-            bridge.getRoomMessages(roomId, limit, from)
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject(e.message ?: "getRoomMessages failed", e)
+        scope.launch {
+            try {
+                val result = bridge.getRoomMessages(roomId, limit, from)
+                val jsResult = JSObject()
+                val jsEvents = JSArray()
+                @Suppress("UNCHECKED_CAST")
+                (result["events"] as? List<Map<String, Any?>>)?.forEach { event ->
+                    val jsEvent = JSObject()
+                    event.forEach { (key, value) -> jsEvent.put(key, value) }
+                    jsEvents.put(jsEvent)
+                }
+                jsResult.put("events", jsEvents)
+                jsResult.put("nextBatch", result["nextBatch"])
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "getRoomMessages failed", e)
+            }
         }
     }
 
@@ -186,11 +242,13 @@ class MatrixPlugin : Plugin() {
         val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
         val eventId = call.getString("eventId") ?: return call.reject("Missing eventId")
 
-        try {
-            bridge.markRoomAsRead(roomId, eventId)
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject(e.message ?: "markRoomAsRead failed", e)
+        scope.launch {
+            try {
+                bridge.markRoomAsRead(roomId, eventId)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "markRoomAsRead failed", e)
+            }
         }
     }
 

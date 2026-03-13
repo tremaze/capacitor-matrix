@@ -134,11 +134,13 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing roomId")
         }
 
-        do {
-            let members = try bridge.getRoomMembers(roomId: roomId)
-            call.resolve(["members": members])
-        } catch {
-            call.reject(error.localizedDescription)
+        Task {
+            do {
+                let members = try await bridge.getRoomMembers(roomId: roomId)
+                call.resolve(["members": members])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
         }
     }
 
