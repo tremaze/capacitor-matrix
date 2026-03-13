@@ -27,7 +27,26 @@ export interface SessionInfo {
 export interface SendMessageOptions {
   roomId: string;
   body: string;
-  msgtype?: 'm.text' | 'm.notice' | 'm.emote';
+  msgtype?: 'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.audio' | 'm.video' | 'm.file';
+  fileUri?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+}
+
+// Presence
+
+export interface PresenceInfo {
+  presence: 'online' | 'offline' | 'unavailable';
+  statusMsg?: string;
+  lastActiveAgo?: number;
+}
+
+// Typing
+
+export interface TypingEvent {
+  roomId: string;
+  userIds: string[];
 }
 
 export interface MatrixEvent {
@@ -55,6 +74,33 @@ export interface RoomMember {
   userId: string;
   displayName?: string;
   membership: 'join' | 'invite' | 'leave' | 'ban';
+}
+
+// Encryption
+
+export interface CrossSigningStatus {
+  hasMaster: boolean;
+  hasSelfSigning: boolean;
+  hasUserSigning: boolean;
+  isReady: boolean;
+}
+
+export interface KeyBackupStatus {
+  exists: boolean;
+  version?: string;
+  enabled: boolean;
+}
+
+export interface RecoveryKeyInfo {
+  recoveryKey: string;
+}
+
+export interface EncryptionStatus {
+  isCrossSigningReady: boolean;
+  crossSigningStatus: CrossSigningStatus;
+  isKeyBackupEnabled: boolean;
+  keyBackupVersion?: string;
+  isSecretStorageReady: boolean;
 }
 
 // Events & Sync
@@ -90,6 +136,12 @@ export interface MatrixPlugin {
   getSyncState(): Promise<{ state: SyncState }>;
 
   // Rooms
+  createRoom(options: {
+    name?: string;
+    topic?: string;
+    isEncrypted?: boolean;
+    invite?: string[];
+  }): Promise<{ roomId: string }>;
   getRooms(): Promise<{ rooms: RoomSummary[] }>;
   getRoomMembers(options: { roomId: string }): Promise<{ members: RoomMember[] }>;
   joinRoom(options: { roomIdOrAlias: string }): Promise<{ roomId: string }>;
@@ -106,6 +158,69 @@ export interface MatrixPlugin {
     roomId: string;
     eventId: string;
   }): Promise<void>;
+  redactEvent(options: {
+    roomId: string;
+    eventId: string;
+    reason?: string;
+  }): Promise<void>;
+  sendReaction(options: {
+    roomId: string;
+    eventId: string;
+    key: string;
+  }): Promise<{ eventId: string }>;
+
+  // Room Management
+  setRoomName(options: { roomId: string; name: string }): Promise<void>;
+  setRoomTopic(options: { roomId: string; topic: string }): Promise<void>;
+  inviteUser(options: { roomId: string; userId: string }): Promise<void>;
+  kickUser(options: { roomId: string; userId: string; reason?: string }): Promise<void>;
+  banUser(options: { roomId: string; userId: string; reason?: string }): Promise<void>;
+  unbanUser(options: { roomId: string; userId: string }): Promise<void>;
+
+  // Typing
+  sendTyping(options: {
+    roomId: string;
+    isTyping: boolean;
+    timeout?: number;
+  }): Promise<void>;
+
+  // Media
+  getMediaUrl(options: { mxcUrl: string }): Promise<{ httpUrl: string }>;
+
+  // Presence
+  setPresence(options: {
+    presence: 'online' | 'offline' | 'unavailable';
+    statusMsg?: string;
+  }): Promise<void>;
+  getPresence(options: { userId: string }): Promise<PresenceInfo>;
+
+  // Encryption
+  initializeCrypto(): Promise<void>;
+  getEncryptionStatus(): Promise<EncryptionStatus>;
+  bootstrapCrossSigning(): Promise<void>;
+  setupKeyBackup(): Promise<KeyBackupStatus>;
+  getKeyBackupStatus(): Promise<KeyBackupStatus>;
+  restoreKeyBackup(options?: {
+    recoveryKey?: string;
+  }): Promise<{ importedKeys: number }>;
+  setupRecovery(options?: {
+    passphrase?: string;
+  }): Promise<RecoveryKeyInfo>;
+  isRecoveryEnabled(): Promise<{ enabled: boolean }>;
+  recoverAndSetup(options: {
+    recoveryKey?: string;
+    passphrase?: string;
+  }): Promise<void>;
+  resetRecoveryKey(options?: {
+    passphrase?: string;
+  }): Promise<RecoveryKeyInfo>;
+  exportRoomKeys(options: {
+    passphrase: string;
+  }): Promise<{ data: string }>;
+  importRoomKeys(options: {
+    data: string;
+    passphrase: string;
+  }): Promise<{ importedKeys: number }>;
 
   // Listeners
   addListener(
@@ -119,6 +234,10 @@ export interface MatrixPlugin {
   addListener(
     event: 'roomUpdated',
     listenerFunc: (data: RoomUpdatedEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    event: 'typingChanged',
+    listenerFunc: (data: TypingEvent) => void,
   ): Promise<PluginListenerHandle>;
   removeAllListeners(): Promise<void>;
 }

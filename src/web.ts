@@ -3,9 +3,14 @@ import {
   createClient,
   ClientEvent,
   RoomEvent,
+  RoomMemberEvent,
   Direction,
   MsgType,
+  EventType,
+  RelationType,
 } from 'matrix-js-sdk';
+import { decodeRecoveryKey } from 'matrix-js-sdk/lib/crypto-api/recovery-key';
+import { deriveRecoveryKeyFromPassphrase } from 'matrix-js-sdk/lib/crypto-api/key-passphrase';
 import type { MatrixClient, Room, MatrixEvent as SdkMatrixEvent } from 'matrix-js-sdk';
 
 import type {
@@ -18,12 +23,58 @@ import type {
   RoomSummary,
   RoomMember,
   SyncState,
+  EncryptionStatus,
+  KeyBackupStatus,
+  RecoveryKeyInfo,
+  PresenceInfo,
 } from './definitions';
 
 const SESSION_KEY = 'matrix_session';
 
 export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   private client?: MatrixClient;
+  private secretStorageKey?: Uint8Array<ArrayBuffer>;
+  private recoveryPassphrase?: string;
+
+  private readonly _cryptoCallbacks = {
+    getSecretStorageKey: async (
+      opts: { keys: Record<string, unknown> },
+    ): Promise<[string, Uint8Array<ArrayBuffer>] | null> => {
+      const keyId = Object.keys(opts.keys)[0];
+      if (!keyId) return null;
+
+      // If we have the raw key cached, use it directly
+      if (this.secretStorageKey) {
+        return [keyId, this.secretStorageKey];
+      }
+
+      // If we have a passphrase, derive the key using the server's stored parameters
+      if (this.recoveryPassphrase) {
+        const keyInfo = opts.keys[keyId] as {
+          passphrase?: { salt: string; iterations: number; bits?: number };
+        };
+        if (keyInfo?.passphrase) {
+          const derived = await deriveRecoveryKeyFromPassphrase(
+            this.recoveryPassphrase,
+            keyInfo.passphrase.salt,
+            keyInfo.passphrase.iterations,
+            keyInfo.passphrase.bits ?? 256,
+          );
+          this.secretStorageKey = derived;
+          return [keyId, derived];
+        }
+      }
+
+      return null;
+    },
+    cacheSecretStorageKey: (
+      _keyId: string,
+      _keyInfo: unknown,
+      key: Uint8Array<ArrayBuffer>,
+    ): void => {
+      this.secretStorageKey = key;
+    },
+  };
 
   // ── Auth ──────────────────────────────────────────────
 
@@ -36,6 +87,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       accessToken: res.access_token,
       userId: res.user_id,
       deviceId: res.device_id,
+      cryptoCallbacks: this._cryptoCallbacks,
     });
 
     const session: SessionInfo = {
@@ -55,6 +107,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       accessToken: options.accessToken,
       userId: options.userId,
       deviceId: options.deviceId,
+      cryptoCallbacks: this._cryptoCallbacks,
     });
 
     const session: SessionInfo = {
@@ -105,11 +158,9 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     });
 
     this.client!.on(RoomEvent.Timeline, (event: SdkMatrixEvent, room: Room | undefined) => {
-      if (event.getType() === 'm.room.message') {
-        this.notifyListeners('messageReceived', {
-          event: this.serializeEvent(event, room?.roomId),
-        });
-      }
+      this.notifyListeners('messageReceived', {
+        event: this.serializeEvent(event, room?.roomId),
+      });
     });
 
     this.client!.on(RoomEvent.Name, (room: Room) => {
@@ -117,6 +168,18 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         roomId: room.roomId,
         summary: this.serializeRoom(room),
       });
+    });
+
+    this.client!.on(RoomMemberEvent.Typing, (_event: SdkMatrixEvent, member: any) => {
+      const roomId = member?.roomId;
+      if (roomId) {
+        const room = this.client!.getRoom(roomId);
+        if (room) {
+          const typingEvent = room.currentState.getStateEvents('m.typing', '');
+          const userIds: string[] = typingEvent?.getContent()?.user_ids ?? [];
+          this.notifyListeners('typingChanged', { roomId, userIds });
+        }
+      }
     });
 
     await this.client!.startClient({ initialSyncLimit: 20 });
@@ -134,6 +197,34 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   }
 
   // ── Rooms ─────────────────────────────────────────────
+
+  async createRoom(options: {
+    name?: string;
+    topic?: string;
+    isEncrypted?: boolean;
+    invite?: string[];
+  }): Promise<{ roomId: string }> {
+    this.requireClient();
+
+    const createOpts: Record<string, unknown> = {
+      visibility: 'private' as const,
+    };
+    if (options.name) createOpts.name = options.name;
+    if (options.topic) createOpts.topic = options.topic;
+    if (options.invite?.length) createOpts.invite = options.invite;
+    if (options.isEncrypted) {
+      createOpts.initial_state = [
+        {
+          type: 'm.room.encryption',
+          state_key: '',
+          content: { algorithm: 'm.megolm.v1.aes-sha2' },
+        },
+      ];
+    }
+
+    const res = await this.client!.createRoom(createOpts);
+    return { roomId: res.room_id };
+  }
 
   async getRooms(): Promise<{ rooms: RoomSummary[] }> {
     this.requireClient();
@@ -171,14 +262,41 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async sendMessage(options: SendMessageOptions): Promise<{ eventId: string }> {
     this.requireClient();
+
+    const msgtype = options.msgtype ?? 'm.text';
+    const mediaTypes = ['m.image', 'm.audio', 'm.video', 'm.file'];
+
+    if (mediaTypes.includes(msgtype) && options.fileUri) {
+      // Media message: upload file then send
+      const response = await fetch(options.fileUri);
+      const blob = await response.blob();
+      const uploadRes = await this.client!.uploadContent(blob, {
+        name: options.fileName,
+        type: options.mimeType,
+      });
+      const mxcUrl = uploadRes.content_uri;
+      const content: Record<string, unknown> = {
+        msgtype,
+        body: options.body || options.fileName || 'file',
+        url: mxcUrl,
+        info: {
+          mimetype: options.mimeType,
+          size: options.fileSize ?? blob.size,
+        },
+      };
+      const res = await this.client!.sendMessage(options.roomId, content as any);
+      return { eventId: res.event_id };
+    }
+
+    // Text message
     const msgtypeMap = {
       'm.text': MsgType.Text,
       'm.notice': MsgType.Notice,
       'm.emote': MsgType.Emote,
     } as const;
-    const msgtype = msgtypeMap[options.msgtype ?? 'm.text'];
+    const mappedType = msgtypeMap[msgtype as keyof typeof msgtypeMap] ?? MsgType.Text;
     const res = await this.client!.sendMessage(options.roomId, {
-      msgtype,
+      msgtype: mappedType,
       body: options.body,
     });
     return { eventId: res.event_id };
@@ -189,13 +307,26 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   ): Promise<{ events: MatrixEvent[]; nextBatch?: string }> {
     this.requireClient();
 
+    const limit = options.limit ?? 20;
     const room = this.client!.getRoom(options.roomId);
-    const fromToken = options.from ?? room?.getLiveTimeline().getPaginationToken(Direction.Backward) ?? null;
 
+    // If no explicit pagination token, return events from the synced timeline
+    if (!options.from && room) {
+      const timeline = room.getLiveTimeline();
+      const timelineEvents = timeline.getEvents();
+      const events: MatrixEvent[] = timelineEvents
+        .slice(-limit)
+        .map((e) => this.serializeEvent(e, options.roomId));
+      const backToken = timeline.getPaginationToken(Direction.Backward) ?? undefined;
+      return { events, nextBatch: backToken };
+    }
+
+    // Paginate further back using the token
+    const fromToken = options.from ?? null;
     const res = await this.client!.createMessagesRequest(
       options.roomId,
       fromToken,
-      options.limit ?? 20,
+      limit,
       Direction.Backward,
     );
 
@@ -220,12 +351,275 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     );
   }
 
+  // ── Redactions & Reactions ───────────────────────────────
+
+  async redactEvent(options: { roomId: string; eventId: string; reason?: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.redactEvent(options.roomId, options.eventId, undefined, {
+      reason: options.reason,
+    } as any);
+  }
+
+  async sendReaction(options: { roomId: string; eventId: string; key: string }): Promise<{ eventId: string }> {
+    this.requireClient();
+    const res = await this.client!.sendEvent(options.roomId, EventType.Reaction, {
+      'm.relates_to': {
+        rel_type: RelationType.Annotation,
+        event_id: options.eventId,
+        key: options.key,
+      },
+    });
+    return { eventId: res.event_id };
+  }
+
+  // ── Room Management ────────────────────────────────────
+
+  async setRoomName(options: { roomId: string; name: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.setRoomName(options.roomId, options.name);
+  }
+
+  async setRoomTopic(options: { roomId: string; topic: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.setRoomTopic(options.roomId, options.topic);
+  }
+
+  async inviteUser(options: { roomId: string; userId: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.invite(options.roomId, options.userId);
+  }
+
+  async kickUser(options: { roomId: string; userId: string; reason?: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.kick(options.roomId, options.userId, options.reason);
+  }
+
+  async banUser(options: { roomId: string; userId: string; reason?: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.ban(options.roomId, options.userId, options.reason);
+  }
+
+  async unbanUser(options: { roomId: string; userId: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.unban(options.roomId, options.userId);
+  }
+
+  // ── Typing ─────────────────────────────────────────────
+
+  async sendTyping(options: { roomId: string; isTyping: boolean; timeout?: number }): Promise<void> {
+    this.requireClient();
+    await this.client!.sendTyping(options.roomId, options.isTyping, options.timeout ?? 30000);
+  }
+
+  // ── Media ──────────────────────────────────────────────
+
+  async getMediaUrl(options: { mxcUrl: string }): Promise<{ httpUrl: string }> {
+    this.requireClient();
+    const httpUrl = this.client!.mxcUrlToHttp(options.mxcUrl) ?? '';
+    return { httpUrl };
+  }
+
+  // ── Presence ───────────────────────────────────────────
+
+  async setPresence(options: { presence: 'online' | 'offline' | 'unavailable'; statusMsg?: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.setPresence({
+      presence: options.presence,
+      status_msg: options.statusMsg,
+    });
+  }
+
+  async getPresence(options: { userId: string }): Promise<PresenceInfo> {
+    this.requireClient();
+    const user = this.client!.getUser(options.userId);
+    return {
+      presence: (user?.presence as PresenceInfo['presence']) ?? 'offline',
+      statusMsg: user?.presenceStatusMsg ?? undefined,
+      lastActiveAgo: user?.lastActiveAgo ?? undefined,
+    };
+  }
+
+  // ── Encryption ──────────────────────────────────────────
+
+  async initializeCrypto(): Promise<void> {
+    this.requireClient();
+    await this.client!.initRustCrypto();
+  }
+
+  async getEncryptionStatus(): Promise<EncryptionStatus> {
+    this.requireClient();
+    const crypto = this.client!.getCrypto();
+    if (!crypto) {
+      return {
+        isCrossSigningReady: false,
+        crossSigningStatus: { hasMaster: false, hasSelfSigning: false, hasUserSigning: false, isReady: false },
+        isKeyBackupEnabled: false,
+        isSecretStorageReady: false,
+      };
+    }
+
+    const csReady = await crypto.isCrossSigningReady();
+    const csStatus = await crypto.getCrossSigningStatus();
+    const backupVersion = await crypto.getActiveSessionBackupVersion();
+
+    // Use getSecretStorageStatus().defaultKeyId to check if secret storage was
+    // set up at all, rather than isSecretStorageReady() which also checks that
+    // cross-signing keys are stored (too strict for Phase 1).
+    const ssStatus = await crypto.getSecretStorageStatus();
+    const ssHasKey = ssStatus.defaultKeyId !== null;
+
+    return {
+      isCrossSigningReady: csReady,
+      crossSigningStatus: {
+        hasMaster: csStatus.publicKeysOnDevice,
+        hasSelfSigning: csStatus.privateKeysCachedLocally.selfSigningKey,
+        hasUserSigning: csStatus.privateKeysCachedLocally.userSigningKey,
+        isReady: csReady,
+      },
+      isKeyBackupEnabled: backupVersion !== null,
+      keyBackupVersion: backupVersion ?? undefined,
+      isSecretStorageReady: ssHasKey,
+    };
+  }
+
+  async bootstrapCrossSigning(): Promise<void> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+    await crypto.bootstrapCrossSigning({
+      setupNewCrossSigning: true,
+      authUploadDeviceSigningKeys: async (makeRequest) => {
+        // UIA flow: attempt with dummy auth, fall back to session-based retry
+        try {
+          await makeRequest({ type: 'm.login.dummy' });
+        } catch (e: any) {
+          const session = e?.data?.session;
+          if (session) {
+            await makeRequest({ type: 'm.login.dummy', session });
+          } else {
+            throw e;
+          }
+        }
+      },
+    });
+  }
+
+  async setupKeyBackup(): Promise<KeyBackupStatus> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+    await crypto.resetKeyBackup();
+    const version = await crypto.getActiveSessionBackupVersion();
+    return { exists: true, version: version ?? undefined, enabled: true };
+  }
+
+  async getKeyBackupStatus(): Promise<KeyBackupStatus> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+    const version = await crypto.getActiveSessionBackupVersion();
+    return {
+      exists: version !== null,
+      version: version ?? undefined,
+      enabled: version !== null,
+    };
+  }
+
+  async restoreKeyBackup(_options?: { recoveryKey?: string }): Promise<{ importedKeys: number }> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+
+    const result = await crypto.restoreKeyBackup();
+    return { importedKeys: result?.imported ?? 0 };
+  }
+
+  async setupRecovery(options?: { passphrase?: string }): Promise<RecoveryKeyInfo> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+
+    const keyInfo = await crypto.createRecoveryKeyFromPassphrase(options?.passphrase);
+    this.secretStorageKey = keyInfo.privateKey;
+
+    await crypto.bootstrapSecretStorage({
+      createSecretStorageKey: async () => keyInfo,
+      setupNewSecretStorage: true,
+      setupNewKeyBackup: true,
+    });
+
+    return { recoveryKey: keyInfo.encodedPrivateKey ?? '' };
+  }
+
+  async isRecoveryEnabled(): Promise<{ enabled: boolean }> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+    const ready = await crypto.isSecretStorageReady();
+    return { enabled: ready };
+  }
+
+  async recoverAndSetup(options: { recoveryKey?: string; passphrase?: string }): Promise<void> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+
+    // Derive/decode the secret storage key
+    if (options.recoveryKey) {
+      this.secretStorageKey = decodeRecoveryKey(options.recoveryKey);
+    } else if (options.passphrase) {
+      // Store passphrase — the getSecretStorageKey callback will derive
+      // the key using the server's stored PBKDF2 params (salt, iterations)
+      this.recoveryPassphrase = options.passphrase;
+      this.secretStorageKey = undefined; // Clear any stale raw key
+    } else {
+      throw new Error('Either recoveryKey or passphrase must be provided');
+    }
+
+    // Load the backup decryption key from secret storage into the Rust crypto store.
+    // This triggers the getSecretStorageKey callback.
+    try {
+      await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
+    } catch (e) {
+      // Clear stale key material so the next attempt starts fresh
+      this.secretStorageKey = undefined;
+      this.recoveryPassphrase = undefined;
+      throw e;
+    }
+
+    // Now that the key is stored locally, activate backup in the running client
+    await crypto.checkKeyBackupAndEnable();
+  }
+
+  async resetRecoveryKey(options?: { passphrase?: string }): Promise<RecoveryKeyInfo> {
+    return this.setupRecovery(options);
+  }
+
+  async exportRoomKeys(options: { passphrase: string }): Promise<{ data: string }> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+    const keys = await crypto.exportRoomKeysAsJson();
+    // The exported JSON is not encrypted by default; for passphrase encryption
+    // the caller should handle it, or we return the raw JSON
+    void options.passphrase; // passphrase encryption is handled natively; on web we return raw
+    return { data: keys };
+  }
+
+  async importRoomKeys(options: { data: string; passphrase: string }): Promise<{ importedKeys: number }> {
+    this.requireClient();
+    const crypto = this.requireCrypto();
+    void options.passphrase; // passphrase decryption handled natively; on web we import raw
+    await crypto.importRoomKeysAsJson(options.data);
+    return { importedKeys: -1 }; // count not available from importRoomKeysAsJson
+  }
+
   // ── Helpers ───────────────────────────────────────────
 
   private requireClient(): void {
     if (!this.client) {
       throw new Error('Not logged in. Call login() or loginWithToken() first.');
     }
+  }
+
+  private requireCrypto() {
+    const crypto = this.client!.getCrypto();
+    if (!crypto) {
+      throw new Error('Crypto not initialized. Call initializeCrypto() first.');
+    }
+    return crypto;
   }
 
   private persistSession(session: SessionInfo): void {
