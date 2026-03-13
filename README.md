@@ -1,28 +1,299 @@
 # @tremaze/capacitor-matrix
 
-A capacitor plugin wrapping native matrix SDKs
+A [Capacitor](https://capacitorjs.com/) plugin that provides a unified API for the [Matrix](https://matrix.org/) communication protocol across Web, Android, and iOS.
+
+- **Web** — powered by [matrix-js-sdk](https://github.com/matrix-org/matrix-js-sdk)
+- **Android** — powered by [matrix-rust-sdk](https://github.com/nicegram/nicegram-android-nicegram-matrix-sdk) (Kotlin bindings)
+- **iOS** — powered by [matrix-rust-components-swift](https://github.com/matrix-org/matrix-rust-components-swift)
+
+## Features
+
+- **Authentication** — password login, token-based login, session persistence
+- **Real-time sync** — incremental sync with state change events
+- **Rooms** — create, join, leave, list rooms with summaries
+- **Messaging** — send/receive text, notices, emotes; paginated message history
+- **Media** — upload and send images, audio, video, and files; resolve `mxc://` URLs
+- **Reactions & Redactions** — react to messages, delete (redact) events
+- **Room management** — rename rooms, set topics, invite/kick/ban/unban users
+- **Typing indicators** — send and receive typing notifications
+- **Presence** — set and query online/offline/unavailable status
+- **End-to-end encryption** — cross-signing, key backup, secret storage, recovery, room key export/import
+
+## Requirements
+
+| Platform | Minimum Version |
+| -------- | --------------- |
+| Capacitor | 8.0.0 |
+| iOS | 16.0 |
+| Android | API 24 (Android 7.0) |
 
 ## Install
 
-To use npm
-
 ```bash
 npm install @tremaze/capacitor-matrix
-````
-
-To use yarn
-
-```bash
-yarn add @tremaze/capacitor-matrix
-```
-
-Sync native files
-
-```bash
 npx cap sync
 ```
 
-## API
+### iOS
+
+No additional setup required. The Swift Package Manager dependency on `matrix-rust-components-swift` is resolved automatically.
+
+### Android
+
+The plugin uses `matrix-rust-sdk` via Maven. Ensure your project's `build.gradle` includes `mavenCentral()` in the repositories block (this is the default for new Capacitor projects).
+
+## Usage
+
+### Import
+
+```typescript
+import { Matrix } from '@tremaze/capacitor-matrix';
+```
+
+### Authentication
+
+```typescript
+// Login with username and password
+const session = await Matrix.login({
+  homeserverUrl: 'https://matrix.example.com',
+  userId: '@alice:example.com',
+  password: 'secret',
+});
+console.log('Logged in as', session.userId);
+
+// Or restore a session using a stored access token
+const session = await Matrix.loginWithToken({
+  homeserverUrl: 'https://matrix.example.com',
+  accessToken: 'syt_...',
+  userId: '@alice:example.com',
+  deviceId: 'ABCDEF',
+});
+
+// Check for an existing session (persisted in localStorage on web)
+const existing = await Matrix.getSession();
+if (existing) {
+  console.log('Already logged in as', existing.userId);
+}
+
+// Logout
+await Matrix.logout();
+```
+
+### Sync
+
+Start the background sync loop to receive real-time updates:
+
+```typescript
+// Listen for sync state changes
+await Matrix.addListener('syncStateChange', ({ state, error }) => {
+  console.log('Sync state:', state); // 'INITIAL' | 'SYNCING' | 'ERROR' | 'STOPPED'
+  if (error) console.error('Sync error:', error);
+});
+
+await Matrix.startSync();
+
+// Later, stop syncing
+await Matrix.stopSync();
+```
+
+### Rooms
+
+```typescript
+// List joined rooms
+const { rooms } = await Matrix.getRooms();
+rooms.forEach((room) => {
+  console.log(room.name, `(${room.memberCount} members)`);
+});
+
+// Create a room
+const { roomId } = await Matrix.createRoom({
+  name: 'Project Chat',
+  topic: 'Discussion about the project',
+  isEncrypted: true,
+  invite: ['@bob:example.com'],
+});
+
+// Join a room by ID or alias
+await Matrix.joinRoom({ roomIdOrAlias: '#general:example.com' });
+
+// Leave a room
+await Matrix.leaveRoom({ roomId: '!abc:example.com' });
+
+// Get room members
+const { members } = await Matrix.getRoomMembers({ roomId });
+```
+
+### Messaging
+
+```typescript
+// Send a text message
+const { eventId } = await Matrix.sendMessage({
+  roomId: '!abc:example.com',
+  body: 'Hello, world!',
+});
+
+// Send a notice or emote
+await Matrix.sendMessage({
+  roomId,
+  body: 'This is a notice',
+  msgtype: 'm.notice',
+});
+
+// Load message history (paginated)
+const { events, nextBatch } = await Matrix.getRoomMessages({
+  roomId,
+  limit: 50,
+});
+
+// Load older messages
+const older = await Matrix.getRoomMessages({
+  roomId,
+  limit: 50,
+  from: nextBatch,
+});
+
+// Listen for new messages in real time
+await Matrix.addListener('messageReceived', ({ event }) => {
+  console.log(`${event.senderId}: ${event.content.body}`);
+});
+```
+
+### Media
+
+```typescript
+// Send an image (provide a file URI on native, or a blob URL on web)
+await Matrix.sendMessage({
+  roomId,
+  body: 'photo.jpg',
+  msgtype: 'm.image',
+  fileUri: 'file:///path/to/photo.jpg',
+  fileName: 'photo.jpg',
+  mimeType: 'image/jpeg',
+});
+
+// Resolve an mxc:// URL to an HTTP URL for display
+const { httpUrl } = await Matrix.getMediaUrl({
+  mxcUrl: 'mxc://example.com/abc123',
+});
+```
+
+### Reactions & Redactions
+
+```typescript
+// React to a message
+await Matrix.sendReaction({
+  roomId,
+  eventId: '$someEvent',
+  key: '👍',
+});
+
+// Redact (delete) a message
+await Matrix.redactEvent({
+  roomId,
+  eventId: '$someEvent',
+  reason: 'Sent by mistake',
+});
+```
+
+### Room Management
+
+```typescript
+await Matrix.setRoomName({ roomId, name: 'New Room Name' });
+await Matrix.setRoomTopic({ roomId, topic: 'Updated topic' });
+
+await Matrix.inviteUser({ roomId, userId: '@carol:example.com' });
+await Matrix.kickUser({ roomId, userId: '@dave:example.com', reason: 'Inactive' });
+await Matrix.banUser({ roomId, userId: '@eve:example.com' });
+await Matrix.unbanUser({ roomId, userId: '@eve:example.com' });
+```
+
+### Typing Indicators
+
+```typescript
+// Send a typing notification
+await Matrix.sendTyping({ roomId, isTyping: true, timeout: 5000 });
+
+// Stop typing
+await Matrix.sendTyping({ roomId, isTyping: false });
+
+// Listen for typing events
+await Matrix.addListener('typingChanged', ({ roomId, userIds }) => {
+  if (userIds.length > 0) {
+    console.log(`${userIds.join(', ')} typing in ${roomId}`);
+  }
+});
+```
+
+### Presence
+
+```typescript
+// Set your presence
+await Matrix.setPresence({ presence: 'online', statusMsg: 'Available' });
+
+// Get another user's presence
+const info = await Matrix.getPresence({ userId: '@bob:example.com' });
+console.log(info.presence, info.statusMsg);
+```
+
+### End-to-End Encryption
+
+```typescript
+// Initialize the crypto module (call after login, before startSync)
+await Matrix.initializeCrypto();
+
+// Check encryption status
+const status = await Matrix.getEncryptionStatus();
+console.log('Cross-signing ready:', status.isCrossSigningReady);
+console.log('Key backup enabled:', status.isKeyBackupEnabled);
+
+// Bootstrap cross-signing (first-time device setup)
+await Matrix.bootstrapCrossSigning();
+
+// Set up server-side key backup
+const backup = await Matrix.setupKeyBackup();
+
+// Set up recovery (generates a recovery key)
+const { recoveryKey } = await Matrix.setupRecovery();
+console.log('Save this recovery key:', recoveryKey);
+
+// Or use a passphrase-based recovery key
+const recovery = await Matrix.setupRecovery({ passphrase: 'my secret phrase' });
+
+// Recover on a new device
+await Matrix.recoverAndSetup({ recoveryKey: 'EsXa ...' });
+// or
+await Matrix.recoverAndSetup({ passphrase: 'my secret phrase' });
+
+// Export/import room keys (for manual backup)
+const { data } = await Matrix.exportRoomKeys({ passphrase: 'backup-pass' });
+await Matrix.importRoomKeys({ data, passphrase: 'backup-pass' });
+```
+
+### Event Listeners
+
+```typescript
+// Room updates (name change, new members, etc.)
+await Matrix.addListener('roomUpdated', ({ roomId, summary }) => {
+  console.log(`Room ${summary.name} updated`);
+});
+
+// Clean up all listeners
+await Matrix.removeAllListeners();
+```
+
+### Read Markers
+
+```typescript
+// Mark a room as read up to a specific event
+await Matrix.markRoomAsRead({
+  roomId: '!abc:example.com',
+  eventId: '$latestEvent',
+});
+```
+
+## API Reference
+
+The full API reference is auto-generated below from the TypeScript definitions.
 
 <docgen-index>
 
@@ -33,6 +304,7 @@ npx cap sync
 * [`startSync()`](#startsync)
 * [`stopSync()`](#stopsync)
 * [`getSyncState()`](#getsyncstate)
+* [`createRoom(...)`](#createroom)
 * [`getRooms()`](#getrooms)
 * [`getRoomMembers(...)`](#getroommembers)
 * [`joinRoom(...)`](#joinroom)
@@ -40,9 +312,34 @@ npx cap sync
 * [`sendMessage(...)`](#sendmessage)
 * [`getRoomMessages(...)`](#getroommessages)
 * [`markRoomAsRead(...)`](#markroomasread)
+* [`redactEvent(...)`](#redactevent)
+* [`sendReaction(...)`](#sendreaction)
+* [`setRoomName(...)`](#setroomname)
+* [`setRoomTopic(...)`](#setroomtopic)
+* [`inviteUser(...)`](#inviteuser)
+* [`kickUser(...)`](#kickuser)
+* [`banUser(...)`](#banuser)
+* [`unbanUser(...)`](#unbanuser)
+* [`sendTyping(...)`](#sendtyping)
+* [`getMediaUrl(...)`](#getmediaurl)
+* [`setPresence(...)`](#setpresence)
+* [`getPresence(...)`](#getpresence)
+* [`initializeCrypto()`](#initializecrypto)
+* [`getEncryptionStatus()`](#getencryptionstatus)
+* [`bootstrapCrossSigning()`](#bootstrapcrosssigning)
+* [`setupKeyBackup()`](#setupkeybackup)
+* [`getKeyBackupStatus()`](#getkeybackupstatus)
+* [`restoreKeyBackup(...)`](#restorekeybackup)
+* [`setupRecovery(...)`](#setuprecovery)
+* [`isRecoveryEnabled()`](#isrecoveryenabled)
+* [`recoverAndSetup(...)`](#recoverandsetup)
+* [`resetRecoveryKey(...)`](#resetrecoverykey)
+* [`exportRoomKeys(...)`](#exportroomkeys)
+* [`importRoomKeys(...)`](#importroomkeys)
 * [`addListener('syncStateChange', ...)`](#addlistenersyncstatechange-)
 * [`addListener('messageReceived', ...)`](#addlistenermessagereceived-)
 * [`addListener('roomUpdated', ...)`](#addlistenerroomupdated-)
+* [`addListener('typingChanged', ...)`](#addlistenertypingchanged-)
 * [`removeAllListeners()`](#removealllisteners)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
@@ -127,6 +424,21 @@ getSyncState() => Promise<{ state: SyncState; }>
 ```
 
 **Returns:** <code>Promise&lt;{ state: <a href="#syncstate">SyncState</a>; }&gt;</code>
+
+--------------------
+
+
+### createRoom(...)
+
+```typescript
+createRoom(options: { name?: string; topic?: string; isEncrypted?: boolean; invite?: string[]; }) => Promise<{ roomId: string; }>
+```
+
+| Param         | Type                                                                                      |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ name?: string; topic?: string; isEncrypted?: boolean; invite?: string[]; }</code> |
+
+**Returns:** <code>Promise&lt;{ roomId: string; }&gt;</code>
 
 --------------------
 
@@ -228,6 +540,318 @@ markRoomAsRead(options: { roomId: string; eventId: string; }) => Promise<void>
 --------------------
 
 
+### redactEvent(...)
+
+```typescript
+redactEvent(options: { roomId: string; eventId: string; reason?: string; }) => Promise<void>
+```
+
+| Param         | Type                                                               |
+| ------------- | ------------------------------------------------------------------ |
+| **`options`** | <code>{ roomId: string; eventId: string; reason?: string; }</code> |
+
+--------------------
+
+
+### sendReaction(...)
+
+```typescript
+sendReaction(options: { roomId: string; eventId: string; key: string; }) => Promise<{ eventId: string; }>
+```
+
+| Param         | Type                                                           |
+| ------------- | -------------------------------------------------------------- |
+| **`options`** | <code>{ roomId: string; eventId: string; key: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ eventId: string; }&gt;</code>
+
+--------------------
+
+
+### setRoomName(...)
+
+```typescript
+setRoomName(options: { roomId: string; name: string; }) => Promise<void>
+```
+
+| Param         | Type                                           |
+| ------------- | ---------------------------------------------- |
+| **`options`** | <code>{ roomId: string; name: string; }</code> |
+
+--------------------
+
+
+### setRoomTopic(...)
+
+```typescript
+setRoomTopic(options: { roomId: string; topic: string; }) => Promise<void>
+```
+
+| Param         | Type                                            |
+| ------------- | ----------------------------------------------- |
+| **`options`** | <code>{ roomId: string; topic: string; }</code> |
+
+--------------------
+
+
+### inviteUser(...)
+
+```typescript
+inviteUser(options: { roomId: string; userId: string; }) => Promise<void>
+```
+
+| Param         | Type                                             |
+| ------------- | ------------------------------------------------ |
+| **`options`** | <code>{ roomId: string; userId: string; }</code> |
+
+--------------------
+
+
+### kickUser(...)
+
+```typescript
+kickUser(options: { roomId: string; userId: string; reason?: string; }) => Promise<void>
+```
+
+| Param         | Type                                                              |
+| ------------- | ----------------------------------------------------------------- |
+| **`options`** | <code>{ roomId: string; userId: string; reason?: string; }</code> |
+
+--------------------
+
+
+### banUser(...)
+
+```typescript
+banUser(options: { roomId: string; userId: string; reason?: string; }) => Promise<void>
+```
+
+| Param         | Type                                                              |
+| ------------- | ----------------------------------------------------------------- |
+| **`options`** | <code>{ roomId: string; userId: string; reason?: string; }</code> |
+
+--------------------
+
+
+### unbanUser(...)
+
+```typescript
+unbanUser(options: { roomId: string; userId: string; }) => Promise<void>
+```
+
+| Param         | Type                                             |
+| ------------- | ------------------------------------------------ |
+| **`options`** | <code>{ roomId: string; userId: string; }</code> |
+
+--------------------
+
+
+### sendTyping(...)
+
+```typescript
+sendTyping(options: { roomId: string; isTyping: boolean; timeout?: number; }) => Promise<void>
+```
+
+| Param         | Type                                                                  |
+| ------------- | --------------------------------------------------------------------- |
+| **`options`** | <code>{ roomId: string; isTyping: boolean; timeout?: number; }</code> |
+
+--------------------
+
+
+### getMediaUrl(...)
+
+```typescript
+getMediaUrl(options: { mxcUrl: string; }) => Promise<{ httpUrl: string; }>
+```
+
+| Param         | Type                             |
+| ------------- | -------------------------------- |
+| **`options`** | <code>{ mxcUrl: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ httpUrl: string; }&gt;</code>
+
+--------------------
+
+
+### setPresence(...)
+
+```typescript
+setPresence(options: { presence: 'online' | 'offline' | 'unavailable'; statusMsg?: string; }) => Promise<void>
+```
+
+| Param         | Type                                                                                   |
+| ------------- | -------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ presence: 'online' \| 'offline' \| 'unavailable'; statusMsg?: string; }</code> |
+
+--------------------
+
+
+### getPresence(...)
+
+```typescript
+getPresence(options: { userId: string; }) => Promise<PresenceInfo>
+```
+
+| Param         | Type                             |
+| ------------- | -------------------------------- |
+| **`options`** | <code>{ userId: string; }</code> |
+
+**Returns:** <code>Promise&lt;<a href="#presenceinfo">PresenceInfo</a>&gt;</code>
+
+--------------------
+
+
+### initializeCrypto()
+
+```typescript
+initializeCrypto() => Promise<void>
+```
+
+--------------------
+
+
+### getEncryptionStatus()
+
+```typescript
+getEncryptionStatus() => Promise<EncryptionStatus>
+```
+
+**Returns:** <code>Promise&lt;<a href="#encryptionstatus">EncryptionStatus</a>&gt;</code>
+
+--------------------
+
+
+### bootstrapCrossSigning()
+
+```typescript
+bootstrapCrossSigning() => Promise<void>
+```
+
+--------------------
+
+
+### setupKeyBackup()
+
+```typescript
+setupKeyBackup() => Promise<KeyBackupStatus>
+```
+
+**Returns:** <code>Promise&lt;<a href="#keybackupstatus">KeyBackupStatus</a>&gt;</code>
+
+--------------------
+
+
+### getKeyBackupStatus()
+
+```typescript
+getKeyBackupStatus() => Promise<KeyBackupStatus>
+```
+
+**Returns:** <code>Promise&lt;<a href="#keybackupstatus">KeyBackupStatus</a>&gt;</code>
+
+--------------------
+
+
+### restoreKeyBackup(...)
+
+```typescript
+restoreKeyBackup(options?: { recoveryKey?: string | undefined; } | undefined) => Promise<{ importedKeys: number; }>
+```
+
+| Param         | Type                                   |
+| ------------- | -------------------------------------- |
+| **`options`** | <code>{ recoveryKey?: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ importedKeys: number; }&gt;</code>
+
+--------------------
+
+
+### setupRecovery(...)
+
+```typescript
+setupRecovery(options?: { passphrase?: string | undefined; } | undefined) => Promise<RecoveryKeyInfo>
+```
+
+| Param         | Type                                  |
+| ------------- | ------------------------------------- |
+| **`options`** | <code>{ passphrase?: string; }</code> |
+
+**Returns:** <code>Promise&lt;<a href="#recoverykeyinfo">RecoveryKeyInfo</a>&gt;</code>
+
+--------------------
+
+
+### isRecoveryEnabled()
+
+```typescript
+isRecoveryEnabled() => Promise<{ enabled: boolean; }>
+```
+
+**Returns:** <code>Promise&lt;{ enabled: boolean; }&gt;</code>
+
+--------------------
+
+
+### recoverAndSetup(...)
+
+```typescript
+recoverAndSetup(options: { recoveryKey?: string; passphrase?: string; }) => Promise<void>
+```
+
+| Param         | Type                                                        |
+| ------------- | ----------------------------------------------------------- |
+| **`options`** | <code>{ recoveryKey?: string; passphrase?: string; }</code> |
+
+--------------------
+
+
+### resetRecoveryKey(...)
+
+```typescript
+resetRecoveryKey(options?: { passphrase?: string | undefined; } | undefined) => Promise<RecoveryKeyInfo>
+```
+
+| Param         | Type                                  |
+| ------------- | ------------------------------------- |
+| **`options`** | <code>{ passphrase?: string; }</code> |
+
+**Returns:** <code>Promise&lt;<a href="#recoverykeyinfo">RecoveryKeyInfo</a>&gt;</code>
+
+--------------------
+
+
+### exportRoomKeys(...)
+
+```typescript
+exportRoomKeys(options: { passphrase: string; }) => Promise<{ data: string; }>
+```
+
+| Param         | Type                                 |
+| ------------- | ------------------------------------ |
+| **`options`** | <code>{ passphrase: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ data: string; }&gt;</code>
+
+--------------------
+
+
+### importRoomKeys(...)
+
+```typescript
+importRoomKeys(options: { data: string; passphrase: string; }) => Promise<{ importedKeys: number; }>
+```
+
+| Param         | Type                                               |
+| ------------- | -------------------------------------------------- |
+| **`options`** | <code>{ data: string; passphrase: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ importedKeys: number; }&gt;</code>
+
+--------------------
+
+
 ### addListener('syncStateChange', ...)
 
 ```typescript
@@ -270,6 +894,22 @@ addListener(event: 'roomUpdated', listenerFunc: (data: RoomUpdatedEvent) => void
 | ------------------ | -------------------------------------------------------------------------------- |
 | **`event`**        | <code>'roomUpdated'</code>                                                       |
 | **`listenerFunc`** | <code>(data: <a href="#roomupdatedevent">RoomUpdatedEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
+### addListener('typingChanged', ...)
+
+```typescript
+addListener(event: 'typingChanged', listenerFunc: (data: TypingEvent) => void) => Promise<PluginListenerHandle>
+```
+
+| Param              | Type                                                                   |
+| ------------------ | ---------------------------------------------------------------------- |
+| **`event`**        | <code>'typingChanged'</code>                                           |
+| **`listenerFunc`** | <code>(data: <a href="#typingevent">TypingEvent</a>) =&gt; void</code> |
 
 **Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
 
@@ -341,11 +981,15 @@ removeAllListeners() => Promise<void>
 
 #### SendMessageOptions
 
-| Prop          | Type                                             |
-| ------------- | ------------------------------------------------ |
-| **`roomId`**  | <code>string</code>                              |
-| **`body`**    | <code>string</code>                              |
-| **`msgtype`** | <code>'m.text' \| 'm.notice' \| 'm.emote'</code> |
+| Prop           | Type                                                                                                |
+| -------------- | --------------------------------------------------------------------------------------------------- |
+| **`roomId`**   | <code>string</code>                                                                                 |
+| **`body`**     | <code>string</code>                                                                                 |
+| **`msgtype`**  | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |
+| **`fileUri`**  | <code>string</code>                                                                                 |
+| **`fileName`** | <code>string</code>                                                                                 |
+| **`mimeType`** | <code>string</code>                                                                                 |
+| **`fileSize`** | <code>number</code>                                                                                 |
 
 
 #### MatrixEvent
@@ -358,6 +1002,52 @@ removeAllListeners() => Promise<void>
 | **`type`**           | <code>string</code>                                              |
 | **`content`**        | <code><a href="#record">Record</a>&lt;string, unknown&gt;</code> |
 | **`originServerTs`** | <code>number</code>                                              |
+
+
+#### PresenceInfo
+
+| Prop                | Type                                                |
+| ------------------- | --------------------------------------------------- |
+| **`presence`**      | <code>'online' \| 'offline' \| 'unavailable'</code> |
+| **`statusMsg`**     | <code>string</code>                                 |
+| **`lastActiveAgo`** | <code>number</code>                                 |
+
+
+#### EncryptionStatus
+
+| Prop                       | Type                                                              |
+| -------------------------- | ----------------------------------------------------------------- |
+| **`isCrossSigningReady`**  | <code>boolean</code>                                              |
+| **`crossSigningStatus`**   | <code><a href="#crosssigningstatus">CrossSigningStatus</a></code> |
+| **`isKeyBackupEnabled`**   | <code>boolean</code>                                              |
+| **`keyBackupVersion`**     | <code>string</code>                                               |
+| **`isSecretStorageReady`** | <code>boolean</code>                                              |
+
+
+#### CrossSigningStatus
+
+| Prop                 | Type                 |
+| -------------------- | -------------------- |
+| **`hasMaster`**      | <code>boolean</code> |
+| **`hasSelfSigning`** | <code>boolean</code> |
+| **`hasUserSigning`** | <code>boolean</code> |
+| **`isReady`**        | <code>boolean</code> |
+
+
+#### KeyBackupStatus
+
+| Prop          | Type                 |
+| ------------- | -------------------- |
+| **`exists`**  | <code>boolean</code> |
+| **`version`** | <code>string</code>  |
+| **`enabled`** | <code>boolean</code> |
+
+
+#### RecoveryKeyInfo
+
+| Prop              | Type                |
+| ----------------- | ------------------- |
+| **`recoveryKey`** | <code>string</code> |
 
 
 #### PluginListenerHandle
@@ -390,6 +1080,14 @@ removeAllListeners() => Promise<void>
 | **`summary`** | <code><a href="#roomsummary">RoomSummary</a></code> |
 
 
+#### TypingEvent
+
+| Prop          | Type                  |
+| ------------- | --------------------- |
+| **`roomId`**  | <code>string</code>   |
+| **`userIds`** | <code>string[]</code> |
+
+
 ### Type Aliases
 
 
@@ -402,6 +1100,59 @@ removeAllListeners() => Promise<void>
 
 Construct a type with a set of properties K of type T
 
-<code>{ [P in K]: T; }</code>
+<code>{ [P in K]: T; }</code>
 
 </docgen-api>
+
+## Development
+
+### Setup
+
+```bash
+npm install
+```
+
+### Build
+
+```bash
+npm run build
+```
+
+### Test
+
+```bash
+npm test              # run once
+npm run test:watch    # watch mode
+```
+
+The test suite covers the web layer (~98 tests) using Vitest with jsdom, mocking `matrix-js-sdk` at the module level.
+
+### Verify All Platforms
+
+```bash
+npm run verify        # builds + tests web, builds Android, builds iOS
+npm run verify:web    # web only
+npm run verify:android
+npm run verify:ios
+```
+
+### Lint & Format
+
+```bash
+npm run lint          # check
+npm run fmt           # auto-fix
+```
+
+### Example App
+
+An example app is included in `example-app/` for manual testing against a local homeserver:
+
+```bash
+cd example-app
+npm install
+npm run dev
+```
+
+## License
+
+MIT
