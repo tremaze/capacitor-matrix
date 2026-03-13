@@ -1,10 +1,10 @@
 import { registerPlugin } from '@capacitor/core';
 
-import type { CapMatrixPlugin } from './definitions';
+import type { MatrixPlugin } from './definitions';
 
-const CapMatrix = registerPlugin<CapMatrixPlugin>('CapMatrix', {
-  web: () => import('./web').then((m) => new m.CapMatrixWeb()),
+const Matrix = registerPlugin<MatrixPlugin>('Matrix', {
+  web: () => import('./web').then((m) => new m.MatrixWeb()),
 });
 
 export * from './definitions';
-export { CapMatrix };
+export { Matrix };
