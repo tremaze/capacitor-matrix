@@ -168,6 +168,22 @@ class MatrixSDKBridge {
         try await room.leave()
     }
 
+    func createRoom(name: String?, topic: String?, isEncrypted: Bool, invite: [String]?) async throws -> String {
+        guard let c = client else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let params = CreateRoomParameters(
+            name: name,
+            topic: topic,
+            isEncrypted: isEncrypted,
+            isDirect: false,
+            visibility: .private,
+            preset: .privateChat,
+            invite: invite
+        )
+        return try await c.createRoom(request: params)
+    }
+
     // MARK: - Messaging
 
     func sendMessage(roomId: String, body: String, msgtype: String) async throws -> String {
@@ -220,6 +236,163 @@ class MatrixSDKBridge {
         }
         let timeline = try await room.timeline()
         try await timeline.markAsRead(receiptType: .read)
+    }
+
+    // MARK: - Redactions & Reactions
+
+    func redactEvent(roomId: String, eventId: String, reason: String?) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let timeline = try await room.timeline()
+        try await timeline.redact(eventOrTransactionId: .eventId(eventId: eventId), reason: reason)
+    }
+
+    func sendReaction(roomId: String, eventId: String, key: String) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let timeline = try await room.timeline()
+        try await timeline.sendReaction(eventId: eventId, key: key)
+    }
+
+    // MARK: - Room Management
+
+    func setRoomName(roomId: String, name: String) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        try await room.setName(name: name)
+    }
+
+    func setRoomTopic(roomId: String, topic: String) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        try await room.setTopic(topic: topic)
+    }
+
+    func inviteUser(roomId: String, userId: String) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        try await room.inviteUserById(userId: userId)
+    }
+
+    func kickUser(roomId: String, userId: String, reason: String?) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        try await room.kickUser(userId: userId, reason: reason)
+    }
+
+    func banUser(roomId: String, userId: String, reason: String?) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        try await room.banUser(userId: userId, reason: reason)
+    }
+
+    func unbanUser(roomId: String, userId: String) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        try await room.unbanUser(userId: userId, reason: nil)
+    }
+
+    // MARK: - Typing
+
+    func sendTyping(roomId: String, isTyping: Bool) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        try await room.typingNotice(isTyping: isTyping)
+    }
+
+    // MARK: - Encryption
+
+    func initializeCrypto() async throws {
+        // No-op on native — Rust SDK handles crypto automatically
+        guard client != nil else { throw MatrixBridgeError.notLoggedIn }
+    }
+
+    func getEncryptionStatus() async throws -> [String: Any] {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        let enc = c.encryption()
+        let vState = enc.verificationState()
+        let backupState = enc.backupState()
+        let recoveryState = enc.recoveryState()
+
+        let isVerified = vState == .verified
+        let isBackupEnabled = backupState == .enabled || backupState == .creating || backupState == .resuming
+
+        return [
+            "isCrossSigningReady": isVerified,
+            "crossSigningStatus": [
+                "hasMaster": isVerified,
+                "hasSelfSigning": isVerified,
+                "hasUserSigning": isVerified,
+                "isReady": isVerified,
+            ],
+            "isKeyBackupEnabled": isBackupEnabled,
+            "isSecretStorageReady": recoveryState == .enabled,
+        ]
+    }
+
+    func bootstrapCrossSigning() async throws {
+        // bootstrapCrossSigning is not available in matrix-rust-components-swift 26.01.04.
+        // Cross-signing is bootstrapped automatically by the SDK when autoEnableCrossSigning
+        // is set on the ClientBuilder. This method is intentionally a no-op here.
+        guard client != nil else { throw MatrixBridgeError.notLoggedIn }
+    }
+
+    func setupKeyBackup() async throws -> [String: Any] {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        try await c.encryption().enableBackups()
+        return ["exists": true, "enabled": true]
+    }
+
+    func getKeyBackupStatus() async throws -> [String: Any] {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        let state = c.encryption().backupState()
+        let enabled = state == .enabled || state == .creating || state == .resuming
+        return ["exists": enabled, "enabled": enabled]
+    }
+
+    func restoreKeyBackup(recoveryKey: String?) async throws -> [String: Any] {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        if let key = recoveryKey {
+            try await c.encryption().recover(recoveryKey: key)
+        }
+        return ["importedKeys": -1]
+    }
+
+    func setupRecovery(passphrase: String?) async throws -> [String: Any] {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        let listener = NoopEnableRecoveryProgressListener()
+        let key = try await c.encryption().enableRecovery(
+            waitForBackupsToUpload: false,
+            passphrase: passphrase,
+            progressListener: listener
+        )
+        return ["recoveryKey": key]
+    }
+
+    func isRecoveryEnabled() async throws -> Bool {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        return c.encryption().recoveryState() == .enabled
+    }
+
+    func recoverAndSetup(recoveryKey: String) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        try await c.encryption().recover(recoveryKey: recoveryKey)
+    }
+
+    func resetRecoveryKey(passphrase: String?) async throws -> [String: Any] {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        let key = try await c.encryption().resetRecoveryKey()
+        return ["recoveryKey": key]
+    }
+
+    func exportRoomKeys(passphrase: String) async throws -> String {
+        // exportRoomKeys is not available in matrix-rust-components-swift 26.01.04.
+        throw MatrixBridgeError.notSupported("exportRoomKeys")
+    }
+
+    func importRoomKeys(data: String, passphrase: String) async throws -> Int {
+        // importRoomKeys is not available in matrix-rust-components-swift 26.01.04.
+        throw MatrixBridgeError.notSupported("importRoomKeys")
     }
 
     // MARK: - Helpers
@@ -348,6 +521,7 @@ class TimelineItemCollector: TimelineListener {
 enum MatrixBridgeError: LocalizedError {
     case notLoggedIn
     case roomNotFound(String)
+    case notSupported(String)
 
     var errorDescription: String? {
         switch self {
@@ -355,6 +529,8 @@ enum MatrixBridgeError: LocalizedError {
             return "Not logged in. Call login() or loginWithToken() first."
         case .roomNotFound(let roomId):
             return "Room \(roomId) not found"
+        case .notSupported(let method):
+            return "\(method) is not supported in this version of the Matrix SDK"
         }
     }
 }
@@ -370,6 +546,14 @@ class SyncStateObserverProxy: SyncServiceStateObserver {
 
     func onUpdate(state: SyncServiceState) {
         onUpdateHandler(state)
+    }
+}
+
+// MARK: - Enable Recovery Progress Listener (no-op)
+
+class NoopEnableRecoveryProgressListener: EnableRecoveryProgressListener {
+    func onUpdate(status: EnableRecoveryProgress) {
+        // No-op — progress updates are not surfaced through the Capacitor bridge
     }
 }
 

@@ -20,6 +20,31 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "sendMessage", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getRoomMessages", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "markRoomAsRead", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "createRoom", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "initializeCrypto", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getEncryptionStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "bootstrapCrossSigning", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setupKeyBackup", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getKeyBackupStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "restoreKeyBackup", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setupRecovery", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "isRecoveryEnabled", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "recoverAndSetup", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "resetRecoveryKey", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "exportRoomKeys", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "importRoomKeys", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "redactEvent", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sendReaction", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setRoomName", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setRoomTopic", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "inviteUser", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "kickUser", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "banUser", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "unbanUser", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sendTyping", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getMediaUrl", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setPresence", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getPresence", returnType: CAPPluginReturnPromise),
     ]
 
     private let bridge = MatrixSDKBridge()
@@ -222,5 +247,337 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.reject(error.localizedDescription)
             }
         }
+    }
+
+    @objc func createRoom(_ call: CAPPluginCall) {
+        let name = call.getString("name")
+        let topic = call.getString("topic")
+        let isEncrypted = call.getBool("isEncrypted") ?? false
+        let invite = call.getArray("invite") as? [String]
+
+        Task {
+            do {
+                let roomId = try await bridge.createRoom(
+                    name: name,
+                    topic: topic,
+                    isEncrypted: isEncrypted,
+                    invite: invite
+                )
+                call.resolve(["roomId": roomId])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func initializeCrypto(_ call: CAPPluginCall) {
+        Task {
+            do {
+                try await bridge.initializeCrypto()
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func getEncryptionStatus(_ call: CAPPluginCall) {
+        Task {
+            do {
+                let status = try await bridge.getEncryptionStatus()
+                call.resolve(status)
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func bootstrapCrossSigning(_ call: CAPPluginCall) {
+        Task {
+            do {
+                try await bridge.bootstrapCrossSigning()
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func setupKeyBackup(_ call: CAPPluginCall) {
+        Task {
+            do {
+                let result = try await bridge.setupKeyBackup()
+                call.resolve(result)
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func getKeyBackupStatus(_ call: CAPPluginCall) {
+        Task {
+            do {
+                let status = try await bridge.getKeyBackupStatus()
+                call.resolve(status)
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func restoreKeyBackup(_ call: CAPPluginCall) {
+        let recoveryKey = call.getString("recoveryKey")
+
+        Task {
+            do {
+                let result = try await bridge.restoreKeyBackup(recoveryKey: recoveryKey)
+                call.resolve(result)
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func setupRecovery(_ call: CAPPluginCall) {
+        let passphrase = call.getString("passphrase")
+
+        Task {
+            do {
+                let result = try await bridge.setupRecovery(passphrase: passphrase)
+                call.resolve(result)
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func isRecoveryEnabled(_ call: CAPPluginCall) {
+        Task {
+            do {
+                let enabled = try await bridge.isRecoveryEnabled()
+                call.resolve(["enabled": enabled])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func recoverAndSetup(_ call: CAPPluginCall) {
+        guard let recoveryKey = call.getString("recoveryKey") else {
+            return call.reject("Missing recoveryKey")
+        }
+
+        Task {
+            do {
+                try await bridge.recoverAndSetup(recoveryKey: recoveryKey)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func resetRecoveryKey(_ call: CAPPluginCall) {
+        let passphrase = call.getString("passphrase")
+
+        Task {
+            do {
+                let result = try await bridge.resetRecoveryKey(passphrase: passphrase)
+                call.resolve(result)
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func exportRoomKeys(_ call: CAPPluginCall) {
+        guard let passphrase = call.getString("passphrase") else {
+            return call.reject("Missing passphrase")
+        }
+
+        Task {
+            do {
+                let data = try await bridge.exportRoomKeys(passphrase: passphrase)
+                call.resolve(["data": data])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func importRoomKeys(_ call: CAPPluginCall) {
+        guard let data = call.getString("data"),
+              let passphrase = call.getString("passphrase") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                let count = try await bridge.importRoomKeys(data: data, passphrase: passphrase)
+                call.resolve(["importedKeys": count])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func redactEvent(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let eventId = call.getString("eventId") else {
+            return call.reject("Missing required parameters")
+        }
+        let reason = call.getString("reason")
+
+        Task {
+            do {
+                try await bridge.redactEvent(roomId: roomId, eventId: eventId, reason: reason)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func sendReaction(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let eventId = call.getString("eventId"),
+              let key = call.getString("key") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                try await bridge.sendReaction(roomId: roomId, eventId: eventId, key: key)
+                call.resolve(["eventId": ""])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func setRoomName(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let name = call.getString("name") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                try await bridge.setRoomName(roomId: roomId, name: name)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func setRoomTopic(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let topic = call.getString("topic") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                try await bridge.setRoomTopic(roomId: roomId, topic: topic)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func inviteUser(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let userId = call.getString("userId") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                try await bridge.inviteUser(roomId: roomId, userId: userId)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func kickUser(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let userId = call.getString("userId") else {
+            return call.reject("Missing required parameters")
+        }
+        let reason = call.getString("reason")
+
+        Task {
+            do {
+                try await bridge.kickUser(roomId: roomId, userId: userId, reason: reason)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func banUser(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let userId = call.getString("userId") else {
+            return call.reject("Missing required parameters")
+        }
+        let reason = call.getString("reason")
+
+        Task {
+            do {
+                try await bridge.banUser(roomId: roomId, userId: userId, reason: reason)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func unbanUser(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let userId = call.getString("userId") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                try await bridge.unbanUser(roomId: roomId, userId: userId)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func sendTyping(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let isTyping = call.getBool("isTyping") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                try await bridge.sendTyping(roomId: roomId, isTyping: isTyping)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func getMediaUrl(_ call: CAPPluginCall) {
+        call.reject("getMediaUrl is only available on web")
+    }
+
+    @objc func setPresence(_ call: CAPPluginCall) {
+        call.reject("setPresence is not supported on this platform")
+    }
+
+    @objc func getPresence(_ call: CAPPluginCall) {
+        call.reject("getPresence is not supported on this platform")
     }
 }

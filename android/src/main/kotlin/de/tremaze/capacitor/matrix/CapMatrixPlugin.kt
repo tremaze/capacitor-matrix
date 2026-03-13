@@ -252,6 +252,315 @@ class MatrixPlugin : Plugin() {
         }
     }
 
+    @PluginMethod
+    fun createRoom(call: PluginCall) {
+        val name = call.getString("name")
+        val topic = call.getString("topic")
+        val isEncrypted = call.getBoolean("isEncrypted") ?: false
+        val inviteArray = call.getArray("invite")
+        val invite = inviteArray?.let { arr ->
+            (0 until arr.length()).map { arr.getString(it) }
+        }
+
+        scope.launch {
+            try {
+                val roomId = bridge.createRoom(name, topic, isEncrypted, invite)
+                call.resolve(JSObject().put("roomId", roomId))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "createRoom failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun redactEvent(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val eventId = call.getString("eventId") ?: return call.reject("Missing eventId")
+        val reason = call.getString("reason")
+
+        scope.launch {
+            try {
+                bridge.redactEvent(roomId, eventId, reason)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "redactEvent failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun sendReaction(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val eventId = call.getString("eventId") ?: return call.reject("Missing eventId")
+        val key = call.getString("key") ?: return call.reject("Missing key")
+
+        scope.launch {
+            try {
+                bridge.sendReaction(roomId, eventId, key)
+                call.resolve(JSObject().put("eventId", ""))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "sendReaction failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun setRoomName(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val name = call.getString("name") ?: return call.reject("Missing name")
+
+        scope.launch {
+            try {
+                bridge.setRoomName(roomId, name)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "setRoomName failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun setRoomTopic(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val topic = call.getString("topic") ?: return call.reject("Missing topic")
+
+        scope.launch {
+            try {
+                bridge.setRoomTopic(roomId, topic)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "setRoomTopic failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun inviteUser(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val userId = call.getString("userId") ?: return call.reject("Missing userId")
+
+        scope.launch {
+            try {
+                bridge.inviteUser(roomId, userId)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "inviteUser failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun kickUser(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val userId = call.getString("userId") ?: return call.reject("Missing userId")
+        val reason = call.getString("reason")
+
+        scope.launch {
+            try {
+                bridge.kickUser(roomId, userId, reason)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "kickUser failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun banUser(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val userId = call.getString("userId") ?: return call.reject("Missing userId")
+        val reason = call.getString("reason")
+
+        scope.launch {
+            try {
+                bridge.banUser(roomId, userId, reason)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "banUser failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun unbanUser(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val userId = call.getString("userId") ?: return call.reject("Missing userId")
+
+        scope.launch {
+            try {
+                bridge.unbanUser(roomId, userId)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "unbanUser failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun sendTyping(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val isTyping = call.getBoolean("isTyping") ?: return call.reject("Missing isTyping")
+
+        scope.launch {
+            try {
+                bridge.sendTyping(roomId, isTyping)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "sendTyping failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun getMediaUrl(call: PluginCall) {
+        call.reject("getMediaUrl is only available on web")
+    }
+
+    @PluginMethod
+    fun setPresence(call: PluginCall) {
+        call.reject("setPresence is not supported on this platform")
+    }
+
+    @PluginMethod
+    fun getPresence(call: PluginCall) {
+        call.reject("getPresence is not supported on this platform")
+    }
+
+    @PluginMethod
+    fun initializeCrypto(call: PluginCall) {
+        scope.launch {
+            try {
+                bridge.initializeCrypto()
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "initializeCrypto failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun getEncryptionStatus(call: PluginCall) {
+        scope.launch {
+            try {
+                val status = bridge.getEncryptionStatus()
+                val jsResult = JSObject()
+                jsResult.put("isCrossSigningReady", status["isCrossSigningReady"])
+                @Suppress("UNCHECKED_CAST")
+                val crossSigning = status["crossSigningStatus"] as? Map<String, Any?>
+                if (crossSigning != null) {
+                    val jsCrossSigning = JSObject()
+                    crossSigning.forEach { (key, value) -> jsCrossSigning.put(key, value) }
+                    jsResult.put("crossSigningStatus", jsCrossSigning)
+                }
+                jsResult.put("isKeyBackupEnabled", status["isKeyBackupEnabled"])
+                jsResult.put("isSecretStorageReady", status["isSecretStorageReady"])
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "getEncryptionStatus failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun setupKeyBackup(call: PluginCall) {
+        scope.launch {
+            try {
+                val result = bridge.setupKeyBackup()
+                val jsResult = JSObject()
+                result.forEach { (key, value) -> jsResult.put(key, value) }
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "setupKeyBackup failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun getKeyBackupStatus(call: PluginCall) {
+        scope.launch {
+            try {
+                val result = bridge.getKeyBackupStatus()
+                val jsResult = JSObject()
+                result.forEach { (key, value) -> jsResult.put(key, value) }
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "getKeyBackupStatus failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun restoreKeyBackup(call: PluginCall) {
+        val recoveryKey = call.getString("recoveryKey")
+
+        scope.launch {
+            try {
+                val result = bridge.restoreKeyBackup(recoveryKey)
+                val jsResult = JSObject()
+                result.forEach { (key, value) -> jsResult.put(key, value) }
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "restoreKeyBackup failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun setupRecovery(call: PluginCall) {
+        val passphrase = call.getString("passphrase")
+
+        scope.launch {
+            try {
+                val result = bridge.setupRecovery(passphrase)
+                val jsResult = JSObject()
+                result.forEach { (key, value) -> jsResult.put(key, value) }
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "setupRecovery failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun isRecoveryEnabled(call: PluginCall) {
+        scope.launch {
+            try {
+                val enabled = bridge.isRecoveryEnabled()
+                call.resolve(JSObject().put("enabled", enabled))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "isRecoveryEnabled failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun recoverAndSetup(call: PluginCall) {
+        val recoveryKey = call.getString("recoveryKey") ?: return call.reject("Missing recoveryKey")
+
+        scope.launch {
+            try {
+                bridge.recoverAndSetup(recoveryKey)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "recoverAndSetup failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun resetRecoveryKey(call: PluginCall) {
+        scope.launch {
+            try {
+                val result = bridge.resetRecoveryKey()
+                val jsResult = JSObject()
+                result.forEach { (key, value) -> jsResult.put(key, value) }
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "resetRecoveryKey failed", e)
+            }
+        }
+    }
+
     private fun SessionInfo.toJSObject(): JSObject {
         return JSObject().apply {
             put("accessToken", accessToken)

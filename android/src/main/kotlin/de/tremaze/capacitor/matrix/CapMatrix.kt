@@ -8,12 +8,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.matrix.rustcomponents.sdk.BackupState
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
+import org.matrix.rustcomponents.sdk.CreateRoomParameters
+import org.matrix.rustcomponents.sdk.EnableRecoveryProgress
+import org.matrix.rustcomponents.sdk.EnableRecoveryProgressListener
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ReceiptType
+import org.matrix.rustcomponents.sdk.RecoveryState
 import org.matrix.rustcomponents.sdk.Room
+import org.matrix.rustcomponents.sdk.RoomPreset
+import org.matrix.rustcomponents.sdk.RoomVisibility
 import org.matrix.rustcomponents.sdk.Session
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
 import org.matrix.rustcomponents.sdk.SyncService
@@ -24,6 +31,7 @@ import org.matrix.rustcomponents.sdk.TimelineDiff
 import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
+import org.matrix.rustcomponents.sdk.VerificationState
 import org.matrix.rustcomponents.sdk.messageEventContentFromMarkdown
 import java.util.Collections
 
@@ -168,6 +176,25 @@ class MatrixSDKBridge(private val context: Context) {
         room.leave()
     }
 
+    suspend fun createRoom(
+        name: String?,
+        topic: String?,
+        isEncrypted: Boolean,
+        invite: List<String>?,
+    ): String {
+        val c = requireClient()
+        val params = CreateRoomParameters(
+            name = name,
+            topic = topic,
+            isEncrypted = isEncrypted,
+            isDirect = false,
+            visibility = RoomVisibility.Private,
+            preset = RoomPreset.PRIVATE_CHAT,
+            invite = invite,
+        )
+        return c.createRoom(params)
+    }
+
     // ── Messaging ─────────────────────────────────────────
 
     suspend fun sendMessage(roomId: String, body: String, msgtype: String): String {
@@ -215,6 +242,158 @@ class MatrixSDKBridge(private val context: Context) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
         room.timeline().markAsRead(receiptType = ReceiptType.READ)
+    }
+
+    // ── Redactions & Reactions ─────────────────────────────
+
+    suspend fun redactEvent(roomId: String, eventId: String, reason: String?) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        val timeline = room.timeline()
+        timeline.redact(EventOrTransactionId.EventId(eventId), reason)
+    }
+
+    suspend fun sendReaction(roomId: String, eventId: String, key: String) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        val timeline = room.timeline()
+        timeline.sendReaction(eventId, key)
+    }
+
+    // ── Room Management ──────────────────────────────────
+
+    suspend fun setRoomName(roomId: String, name: String) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        room.setName(name)
+    }
+
+    suspend fun setRoomTopic(roomId: String, topic: String) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        room.setTopic(topic)
+    }
+
+    suspend fun inviteUser(roomId: String, userId: String) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        room.inviteUserById(userId)
+    }
+
+    suspend fun kickUser(roomId: String, userId: String, reason: String?) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        room.kickUser(userId, reason)
+    }
+
+    suspend fun banUser(roomId: String, userId: String, reason: String?) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        room.banUser(userId, reason)
+    }
+
+    suspend fun unbanUser(roomId: String, userId: String) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        room.unbanUser(userId, null)
+    }
+
+    // ── Typing ───────────────────────────────────────────
+
+    suspend fun sendTyping(roomId: String, isTyping: Boolean) {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        room.typingNotice(isTyping)
+    }
+
+    // ── Encryption ────────────────────────────────────────
+
+    suspend fun initializeCrypto() {
+        // No-op on native — Rust SDK handles crypto automatically
+        requireClient()
+    }
+
+    suspend fun getEncryptionStatus(): Map<String, Any?> {
+        val c = requireClient()
+        val enc = c.encryption()
+        val backupState = enc.backupState()
+        val isBackupEnabled = backupState == BackupState.ENABLED ||
+            backupState == BackupState.CREATING ||
+            backupState == BackupState.RESUMING
+        val recoveryState = enc.recoveryState()
+        val verificationState = enc.verificationState()
+        val isVerified = verificationState == VerificationState.VERIFIED
+
+        return mapOf(
+            "isCrossSigningReady" to isVerified,
+            "crossSigningStatus" to mapOf(
+                "hasMaster" to isVerified,
+                "hasSelfSigning" to isVerified,
+                "hasUserSigning" to isVerified,
+                "isReady" to isVerified,
+            ),
+            "isKeyBackupEnabled" to isBackupEnabled,
+            "isSecretStorageReady" to (recoveryState == RecoveryState.ENABLED),
+        )
+    }
+
+    suspend fun setupKeyBackup(): Map<String, Any?> {
+        val c = requireClient()
+        c.encryption().enableBackups()
+        return mapOf(
+            "exists" to true,
+            "enabled" to true,
+        )
+    }
+
+    suspend fun getKeyBackupStatus(): Map<String, Any?> {
+        val c = requireClient()
+        val state = c.encryption().backupState()
+        val enabled = state == BackupState.ENABLED ||
+            state == BackupState.CREATING ||
+            state == BackupState.RESUMING
+        return mapOf(
+            "exists" to enabled,
+            "enabled" to enabled,
+        )
+    }
+
+    suspend fun restoreKeyBackup(recoveryKey: String?): Map<String, Any?> {
+        val c = requireClient()
+        if (recoveryKey != null) {
+            c.encryption().recover(recoveryKey)
+        }
+        return mapOf("importedKeys" to -1)
+    }
+
+    suspend fun setupRecovery(passphrase: String?): Map<String, Any?> {
+        val c = requireClient()
+        val key = c.encryption().enableRecovery(
+            waitForBackupsToUpload = true,
+            passphrase = passphrase,
+            progressListener = object : EnableRecoveryProgressListener {
+                override fun onUpdate(status: EnableRecoveryProgress) {
+                    // no-op — callers get the key from the return value
+                }
+            },
+        )
+        return mapOf("recoveryKey" to key)
+    }
+
+    suspend fun isRecoveryEnabled(): Boolean {
+        val c = requireClient()
+        return c.encryption().recoveryState() == RecoveryState.ENABLED
+    }
+
+    suspend fun recoverAndSetup(recoveryKey: String) {
+        val c = requireClient()
+        c.encryption().recover(recoveryKey)
+    }
+
+    suspend fun resetRecoveryKey(): Map<String, Any?> {
+        val c = requireClient()
+        val key = c.encryption().resetRecoveryKey()
+        return mapOf("recoveryKey" to key)
     }
 
     // ── Helpers ───────────────────────────────────────────
