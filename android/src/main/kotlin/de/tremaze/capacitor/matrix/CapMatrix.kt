@@ -6,18 +6,26 @@ import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
+import org.matrix.rustcomponents.sdk.EventOrTransactionId
+import org.matrix.rustcomponents.sdk.MsgLikeKind
+import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.Session
+import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.SyncServiceState
 import org.matrix.rustcomponents.sdk.SyncServiceStateObserver
-import org.matrix.rustcomponents.sdk.ReceiptType
-import org.matrix.rustcomponents.sdk.RoomMessageEventContentWithoutRelation
-import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
+import org.matrix.rustcomponents.sdk.TimelineChange
+import org.matrix.rustcomponents.sdk.TimelineDiff
+import org.matrix.rustcomponents.sdk.TimelineItem
+import org.matrix.rustcomponents.sdk.TimelineItemContent
+import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.messageEventContentFromMarkdown
+import java.util.Collections
 
 data class SessionInfo(
     val accessToken: String,
@@ -170,7 +178,9 @@ class MatrixSDKBridge(private val context: Context) {
         val content = messageEventContentFromMarkdown(body)
         timeline.send(content)
 
-        // The Rust SDK sends asynchronously; eventId may not be immediately available
+        // The Rust SDK's send() is fire-and-forget; the real eventId arrives via
+        // timeline listener when the server acknowledges. Use the messageReceived
+        // event listener to capture sent message IDs.
         return ""
     }
 
@@ -178,13 +188,25 @@ class MatrixSDKBridge(private val context: Context) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
         val timeline = room.timeline()
+        val requestedLimit = limit ?: 20
 
-        timeline.paginateBackwards(limit?.toUInt() ?: 20u)
+        val events = Collections.synchronizedList(mutableListOf<Map<String, Any?>>())
 
-        // Return empty for now - full timeline item serialization requires
-        // subscribing to timeline updates
+        val handle = timeline.addListener(object : TimelineListener {
+            override fun onUpdate(diff: List<TimelineDiff>) {
+                for (d in diff) {
+                    collectEventsFromDiff(d, roomId, events)
+                }
+            }
+        })
+
+        timeline.paginateBackwards(requestedLimit.toUInt())
+        delay(500) // Allow listener to process pagination diffs
+
+        handle.cancel()
+
         return mapOf(
-            "events" to emptyList<Map<String, Any?>>(),
+            "events" to events.takeLast(requestedLimit),
             "nextBatch" to null,
         )
     }
@@ -211,6 +233,77 @@ class MatrixSDKBridge(private val context: Context) {
             "isEncrypted" to info.isEncrypted,
             "unreadCount" to (info.numUnreadMessages?.toInt() ?: 0),
             "lastEventTs" to null,
+        )
+    }
+
+    private fun collectEventsFromDiff(
+        diff: TimelineDiff,
+        roomId: String,
+        events: MutableList<Map<String, Any?>>,
+    ) {
+        when (diff.change()) {
+            TimelineChange.Reset -> {
+                events.clear()
+                diff.reset()?.forEach { item ->
+                    serializeTimelineItem(item, roomId)?.let { events.add(it) }
+                }
+            }
+            TimelineChange.Append -> {
+                diff.append()?.forEach { item ->
+                    serializeTimelineItem(item, roomId)?.let { events.add(it) }
+                }
+            }
+            TimelineChange.PushBack -> {
+                diff.pushBack()?.let { item ->
+                    serializeTimelineItem(item, roomId)?.let { events.add(it) }
+                }
+            }
+            TimelineChange.PushFront -> {
+                diff.pushFront()?.let { item ->
+                    serializeTimelineItem(item, roomId)?.let { events.add(0, it) }
+                }
+            }
+            else -> {}
+        }
+    }
+
+    private fun serializeTimelineItem(item: TimelineItem, roomId: String): Map<String, Any?>? {
+        val eventItem = item.asEvent() ?: return null
+
+        val eventId = when (val id = eventItem.eventOrTransactionId()) {
+            is EventOrTransactionId.EventId -> id.eventId
+            is EventOrTransactionId.TransactionId -> id.transactionId
+            else -> ""
+        }
+
+        val contentMap = mutableMapOf<String, Any?>()
+        var eventType = "m.room.message"
+
+        try {
+            when (val content = eventItem.content()) {
+                is TimelineItemContent.MsgLike -> {
+                    when (val kind = content.content.kind) {
+                        is MsgLikeKind.Message -> {
+                            contentMap["body"] = kind.content.body
+                            contentMap["msgtype"] = "m.text"
+                        }
+                        else -> {}
+                    }
+                }
+                is TimelineItemContent.RoomMembership -> eventType = "m.room.member"
+                else -> {}
+            }
+        } catch (_: Exception) {
+            // Content extraction may vary by SDK version; basic event info still returned
+        }
+
+        return mapOf(
+            "eventId" to eventId,
+            "roomId" to roomId,
+            "senderId" to eventItem.sender(),
+            "type" to eventType,
+            "content" to contentMap,
+            "originServerTs" to eventItem.timestamp().toLong(),
         )
     }
 

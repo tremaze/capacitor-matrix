@@ -181,6 +181,9 @@ class MatrixSDKBridge {
         let content = messageEventContentFromMarkdown(md: body)
         try await timeline.send(msg: content)
 
+        // The Rust SDK's send() is fire-and-forget; the real eventId arrives via
+        // timeline listener when the server acknowledges. Use the messageReceived
+        // event listener to capture sent message IDs.
         return ""
     }
 
@@ -192,10 +195,18 @@ class MatrixSDKBridge {
             throw MatrixBridgeError.roomNotFound(roomId)
         }
         let timeline = try await room.timeline()
-        try await timeline.paginateBackwards(numEvents: UInt16(limit))
 
+        let collector = TimelineItemCollector(roomId: roomId)
+        let handle = await timeline.addListener(listener: collector)
+
+        try await timeline.paginateBackwards(numEvents: UInt16(limit))
+        try await Task.sleep(nanoseconds: 500_000_000) // Allow listener to process diffs
+
+        handle.cancel()
+
+        let events = collector.events
         return [
-            "events": [] as [[String: Any]],
+            "events": Array(events.suffix(limit)),
             "nextBatch": nil as String? as Any
         ]
     }
@@ -246,6 +257,89 @@ class MatrixSDKBridge {
         case .offline:
             return "ERROR"
         }
+    }
+}
+
+// MARK: - Timeline Item Collector
+
+class TimelineItemCollector: TimelineListener {
+    private let lock = NSLock()
+    private var _events: [[String: Any]] = []
+    private let roomId: String
+
+    init(roomId: String) {
+        self.roomId = roomId
+    }
+
+    var events: [[String: Any]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _events
+    }
+
+    func onUpdate(diff: [TimelineDiff]) {
+        lock.lock()
+        defer { lock.unlock() }
+        for d in diff {
+            switch d.change() {
+            case .reset:
+                _events.removeAll()
+                d.reset()?.forEach { item in
+                    if let event = Self.serializeTimelineItem(item, roomId: roomId) {
+                        _events.append(event)
+                    }
+                }
+            case .append:
+                d.append()?.forEach { item in
+                    if let event = Self.serializeTimelineItem(item, roomId: roomId) {
+                        _events.append(event)
+                    }
+                }
+            case .pushBack:
+                if let item = d.pushBack(),
+                   let event = Self.serializeTimelineItem(item, roomId: roomId) {
+                    _events.append(event)
+                }
+            case .pushFront:
+                if let item = d.pushFront(),
+                   let event = Self.serializeTimelineItem(item, roomId: roomId) {
+                    _events.insert(event, at: 0)
+                }
+            default:
+                break
+            }
+        }
+    }
+
+    static func serializeTimelineItem(_ item: TimelineItem, roomId: String) -> [String: Any]? {
+        guard let eventItem = item.asEvent() else { return nil }
+
+        let eventId: String
+        switch eventItem.eventOrTransactionId() {
+        case .eventId(let id):
+            eventId = id
+        case .transactionId(let id):
+            eventId = id
+        }
+
+        var contentDict: [String: Any] = [:]
+        var eventType = "m.room.message"
+
+        if case .msgLike(let msgContent) = eventItem.content() {
+            if case .message(let messageContent) = msgContent.kind {
+                contentDict["body"] = messageContent.body
+                contentDict["msgtype"] = "m.text"
+            }
+        }
+
+        return [
+            "eventId": eventId,
+            "roomId": roomId,
+            "senderId": eventItem.sender(),
+            "type": eventType,
+            "content": contentDict,
+            "originServerTs": eventItem.timestamp()
+        ]
     }
 }
 
