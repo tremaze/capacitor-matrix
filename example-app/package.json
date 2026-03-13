@@ -13,14 +13,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "8.0.0",
     "@capacitor/core": "latest",
-    "@tremaze/capacitor-matrix": "file:..",
     "@capacitor/ios": "8.0.0",
-    "@capacitor/android": "8.0.0"
+    "@tremaze/capacitor-matrix": "file:.."
   },
   "devDependencies": {
     "@capacitor/cli": "latest",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vite-plugin-static-copy": "^3.3.0",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0"
   },
   "author": "",
   "license": "ISC"
