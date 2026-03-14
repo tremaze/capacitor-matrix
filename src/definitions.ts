@@ -56,6 +56,10 @@ export interface MatrixEvent {
   type: string;
   content: Record<string, unknown>;
   originServerTs: number;
+  /** Delivery/read status for own messages: 'sending' | 'sent' | 'delivered' | 'read' */
+  status?: 'sending' | 'sent' | 'delivered' | 'read';
+  /** User IDs that have read this event */
+  readBy?: string[];
 }
 
 // Rooms
@@ -68,6 +72,7 @@ export interface RoomSummary {
   isEncrypted: boolean;
   unreadCount: number;
   lastEventTs?: number;
+  membership?: 'join' | 'invite' | 'leave' | 'ban';
 }
 
 export interface RoomMember {

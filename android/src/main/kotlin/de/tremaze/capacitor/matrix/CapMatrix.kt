@@ -221,11 +221,37 @@ class MatrixSDKBridge(private val context: Context) {
                                     }
                                     is TimelineDiff.Set -> {
                                         val event = serializeTimelineItem(d.value, roomId)
-                                        android.util.Log.d("CapMatrix", "  Set serialized: ${event?.get("eventId")} type=${event?.get("type")} reactions=${(event?.get("content") as? Map<*,*>)?.get("reactions")}")
+                                        val contentMap = event?.get("content") as? Map<*, *>
+                                        val reactions = contentMap?.get("reactions")
+                                        android.util.Log.d("CapMatrix", "  Set serialized: ${event?.get("eventId")} type=${event?.get("type")} reactions=$reactions reactionsType=${reactions?.javaClass?.simpleName}")
                                         event?.let { onMessage(it) }
                                     }
+                                    is TimelineDiff.Reset -> {
+                                        android.util.Log.d("CapMatrix", "  Reset: ${d.values.size} items")
+                                        d.values.forEach { item ->
+                                            val event = serializeTimelineItem(item, roomId)
+                                            android.util.Log.d("CapMatrix", "    Reset item: ${event?.get("eventId")} type=${event?.get("type")} reactions=${(event?.get("content") as? Map<*,*>)?.get("reactions")}")
+                                            event?.let { onMessage(it) }
+                                        }
+                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                    }
+                                    is TimelineDiff.Remove -> {
+                                        android.util.Log.d("CapMatrix", "  Remove at index: ${d.index}")
+                                    }
+                                    is TimelineDiff.Insert -> {
+                                        val event = serializeTimelineItem(d.value, roomId)
+                                        android.util.Log.d("CapMatrix", "  Insert at ${d.index}: ${event?.get("eventId")} type=${event?.get("type")}")
+                                        event?.let { onMessage(it) }
+                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                    }
+                                    is TimelineDiff.PushFront -> {
+                                        val event = serializeTimelineItem(d.value, roomId)
+                                        android.util.Log.d("CapMatrix", "  PushFront: ${event?.get("eventId")} type=${event?.get("type")}")
+                                        event?.let { onMessage(it) }
+                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                    }
                                     else -> {
-                                        android.util.Log.d("CapMatrix", "  Ignored diff type: $diffType")
+                                        android.util.Log.d("CapMatrix", "  Unhandled diff type: $diffType")
                                     }
                                 }
                             }
@@ -577,6 +603,15 @@ class MatrixSDKBridge(private val context: Context) {
 
     private suspend fun serializeRoom(room: Room): Map<String, Any?> {
         val info = room.roomInfo()
+        val membership = try {
+            when (room.membership()) {
+                org.matrix.rustcomponents.sdk.Membership.JOINED -> "join"
+                org.matrix.rustcomponents.sdk.Membership.INVITED -> "invite"
+                org.matrix.rustcomponents.sdk.Membership.LEFT -> "leave"
+                org.matrix.rustcomponents.sdk.Membership.BANNED -> "ban"
+                else -> "leave"
+            }
+        } catch (_: Exception) { "join" }
         return mapOf(
             "roomId" to room.id(),
             "name" to (info.displayName ?: ""),
@@ -585,6 +620,7 @@ class MatrixSDKBridge(private val context: Context) {
             "isEncrypted" to (info.encryptionState != EncryptionState.NOT_ENCRYPTED),
             "unreadCount" to (info.numUnreadMessages?.toInt() ?: 0),
             "lastEventTs" to null,
+            "membership" to membership,
         )
     }
 
@@ -681,6 +717,28 @@ class MatrixSDKBridge(private val context: Context) {
             android.util.Log.e("CapMatrix", "Error serializing timeline item: ${e.message}", e)
         }
 
+        // Determine delivery/read status
+        val status: String? = try {
+            val sendState = eventItem.localSendState
+            when {
+                sendState is org.matrix.rustcomponents.sdk.EventSendState.NotSentYet -> "sending"
+                sendState is org.matrix.rustcomponents.sdk.EventSendState.SendingFailed -> "sending"
+                else -> {
+                    // Sent (localSendState is null or Sent) — check read receipts
+                    val receipts = eventItem.readReceipts
+                    val otherReaders = receipts.keys.filter { it != eventItem.sender }
+                    if (otherReaders.isNotEmpty()) "read" else "sent"
+                }
+            }
+        } catch (_: Exception) { "sent" }
+
+        // Collect read-by user IDs
+        val readBy: List<String>? = try {
+            val receipts = eventItem.readReceipts
+            val others = receipts.keys.filter { it != eventItem.sender }
+            if (others.isNotEmpty()) others else null
+        } catch (_: Exception) { null }
+
         return mapOf(
             "eventId" to eventId,
             "roomId" to roomId,
@@ -688,6 +746,8 @@ class MatrixSDKBridge(private val context: Context) {
             "type" to eventType,
             "content" to contentMap,
             "originServerTs" to eventItem.timestamp.toLong(),
+            "status" to status,
+            "readBy" to readBy,
         )
     }
 

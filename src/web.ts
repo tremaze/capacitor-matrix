@@ -162,6 +162,36 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       this.notifyListeners('messageReceived', {
         event: this.serializeEvent(event, room?.roomId),
       });
+      // When an encrypted event arrives, listen for decryption and re-notify
+      if (event.isBeingDecrypted() || event.getType() === 'm.room.encrypted') {
+        event.once('Event.decrypted' as any, () => {
+          this.notifyListeners('messageReceived', {
+            event: this.serializeEvent(event, room?.roomId),
+          });
+        });
+      }
+      // When a reaction or redaction arrives, re-emit the parent event with updated aggregated reactions
+      if (event.getType() === EventType.Reaction || event.getType() === EventType.RoomRedaction) {
+        const rel = event.getContent()?.['m.relates_to'];
+        const targetId = rel?.event_id || event.getAssociatedId();
+        if (targetId && room) {
+          const targetEvent = room.findEventById(targetId);
+          if (targetEvent) {
+            // Small delay to let the SDK finish aggregation
+            setTimeout(() => {
+              this.notifyListeners('messageReceived', {
+                event: this.serializeEvent(targetEvent, room.roomId),
+              });
+            }, 100);
+          }
+        }
+      }
+    });
+
+    this.client!.on(RoomEvent.Receipt, (_event: SdkMatrixEvent, room: Room) => {
+      this.notifyListeners('receiptReceived', {
+        roomId: room.roomId,
+      });
     });
 
     this.client!.on(RoomEvent.Name, (room: Room) => {
@@ -322,9 +352,15 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
       const timeline = room.getLiveTimeline();
       const timelineEvents = timeline.getEvents();
-      const events: MatrixEvent[] = timelineEvents
+      // Filter out reactions and redactions before slicing — they're aggregated into parent events
+      const displayableEvents = timelineEvents.filter((e) => {
+        const t = e.getType();
+        return t !== EventType.Reaction && t !== EventType.RoomRedaction;
+      });
+      const events: MatrixEvent[] = displayableEvents
         .slice(-limit)
-        .map((e) => this.serializeEvent(e, options.roomId));
+        .map((e) => this.serializeEvent(e, options.roomId))
+        .sort((a, b) => a.originServerTs - b.originServerTs);
       const backToken = timeline.getPaginationToken(Direction.Backward) ?? undefined;
       return { events, nextBatch: backToken };
     }
@@ -370,6 +406,34 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async sendReaction(options: { roomId: string; eventId: string; key: string }): Promise<{ eventId: string }> {
     this.requireClient();
+    const myUserId = this.client!.getUserId();
+
+    // Check if the user already reacted with this key — if so, toggle off (redact)
+    const room = this.client!.getRoom(options.roomId);
+    if (room && myUserId) {
+      try {
+        const relations = room.relations.getChildEventsForEvent(
+          options.eventId,
+          RelationType.Annotation,
+          EventType.Reaction,
+        );
+        if (relations) {
+          const existing = relations.getRelations().find(
+            (e) => e.getSender() === myUserId && e.getContent()?.['m.relates_to']?.key === options.key,
+          );
+          if (existing) {
+            const existingId = existing.getId();
+            if (existingId) {
+              await this.client!.redactEvent(options.roomId, existingId);
+              return { eventId: existingId };
+            }
+          }
+        }
+      } catch {
+        // fall through to send
+      }
+    }
+
     const res = await this.client!.sendEvent(options.roomId, EventType.Reaction, {
       'm.relates_to': {
         rel_type: RelationType.Annotation,
@@ -635,13 +699,102 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   }
 
   private serializeEvent(event: SdkMatrixEvent, fallbackRoomId?: string): MatrixEvent {
+    const roomId = event.getRoomId() ?? fallbackRoomId ?? '';
+
+    // Redacted events should be marked clearly
+    if (event.isRedacted()) {
+      return {
+        eventId: event.getId() ?? '',
+        roomId,
+        senderId: event.getSender() ?? '',
+        type: 'm.room.redaction',
+        content: { body: 'Message deleted' },
+        originServerTs: event.getTs(),
+      };
+    }
+
+    const content = { ...(event.getContent() ?? {}) } as Record<string, unknown>;
+
+    // Include aggregated reactions from the room's relations container
+    const eventId = event.getId();
+    if (eventId && roomId) {
+      const room = this.client?.getRoom(roomId);
+      if (room) {
+        try {
+          const relations = room.relations.getChildEventsForEvent(
+            eventId,
+            RelationType.Annotation,
+            EventType.Reaction,
+          );
+          if (relations) {
+            const sorted = relations.getSortedAnnotationsByKey();
+            if (sorted && sorted.length > 0) {
+              content.reactions = sorted.map(([key, events]) => ({
+                key,
+                count: events.size,
+                senders: Array.from(events).map((e) => e.getSender()),
+              }));
+            }
+          }
+        } catch {
+          // relations may not be available
+        }
+      }
+    }
+
+    // Determine delivery/read status
+    let status: MatrixEvent['status'];
+    const readBy: string[] = [];
+    const myUserId = this.client?.getUserId();
+    const sender = event.getSender();
+    const room = eventId && roomId ? this.client?.getRoom(roomId) : undefined;
+
+    if (sender === myUserId && eventId) {
+      // Own message — check delivery status
+      const evtStatus = event.status; // null = sent & echoed, 'sending', 'sent', etc.
+      if (evtStatus === 'sending' || evtStatus === 'encrypting' || evtStatus === 'queued') {
+        status = 'sending';
+      } else {
+        // Event is at least sent; check if anyone has read it
+        if (room) {
+          try {
+            const members = room.getJoinedMembers();
+            for (const member of members) {
+              if (member.userId === myUserId) continue;
+              if (room.hasUserReadEvent(member.userId, eventId)) {
+                readBy.push(member.userId);
+              }
+            }
+          } catch {
+            // ignore errors
+          }
+        }
+        status = readBy.length > 0 ? 'read' : 'sent';
+      }
+    } else if (eventId && room) {
+      // Other's message — collect who has read it
+      try {
+        const members = room.getJoinedMembers();
+        for (const member of members) {
+          if (member.userId === sender) continue;
+          if (room.hasUserReadEvent(member.userId, eventId)) {
+            readBy.push(member.userId);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return {
-      eventId: event.getId() ?? '',
-      roomId: event.getRoomId() ?? fallbackRoomId ?? '',
-      senderId: event.getSender() ?? '',
+      eventId: eventId ?? '',
+      roomId,
+      senderId: sender ?? '',
       type: event.getType(),
-      content: (event.getContent() ?? {}) as Record<string, unknown>,
+      content,
       originServerTs: event.getTs(),
+      status,
+      readBy: readBy.length > 0 ? readBy : undefined,
     };
   }
 
@@ -654,6 +807,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       isEncrypted: room.hasEncryptionStateEvent(),
       unreadCount: room.getUnreadNotificationCount() ?? 0,
       lastEventTs: room.getLastActiveTimestamp() || undefined,
+      membership: room.getMyMembership() as RoomSummary['membership'],
     };
   }
 

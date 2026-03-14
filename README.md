@@ -975,15 +975,16 @@ removeAllListeners() => Promise<void>
 
 #### RoomSummary
 
-| Prop              | Type                 |
-| ----------------- | -------------------- |
-| **`roomId`**      | <code>string</code>  |
-| **`name`**        | <code>string</code>  |
-| **`topic`**       | <code>string</code>  |
-| **`memberCount`** | <code>number</code>  |
-| **`isEncrypted`** | <code>boolean</code> |
-| **`unreadCount`** | <code>number</code>  |
-| **`lastEventTs`** | <code>number</code>  |
+| Prop              | Type                                                |
+| ----------------- | --------------------------------------------------- |
+| **`roomId`**      | <code>string</code>                                 |
+| **`name`**        | <code>string</code>                                 |
+| **`topic`**       | <code>string</code>                                 |
+| **`memberCount`** | <code>number</code>                                 |
+| **`isEncrypted`** | <code>boolean</code>                                |
+| **`unreadCount`** | <code>number</code>                                 |
+| **`lastEventTs`** | <code>number</code>                                 |
+| **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code> |
 
 
 #### RoomMember
@@ -1010,14 +1011,16 @@ removeAllListeners() => Promise<void>
 
 #### MatrixEvent
 
-| Prop                 | Type                                                             |
-| -------------------- | ---------------------------------------------------------------- |
-| **`eventId`**        | <code>string</code>                                              |
-| **`roomId`**         | <code>string</code>                                              |
-| **`senderId`**       | <code>string</code>                                              |
-| **`type`**           | <code>string</code>                                              |
-| **`content`**        | <code><a href="#record">Record</a>&lt;string, unknown&gt;</code> |
-| **`originServerTs`** | <code>number</code>                                              |
+| Prop                 | Type                                                             | Description                                                                         |
+| -------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| **`eventId`**        | <code>string</code>                                              |                                                                                     |
+| **`roomId`**         | <code>string</code>                                              |                                                                                     |
+| **`senderId`**       | <code>string</code>                                              |                                                                                     |
+| **`type`**           | <code>string</code>                                              |                                                                                     |
+| **`content`**        | <code><a href="#record">Record</a>&lt;string, unknown&gt;</code> |                                                                                     |
+| **`originServerTs`** | <code>number</code>                                              |                                                                                     |
+| **`status`**         | <code>'sending' \| 'sent' \| 'delivered' \| 'read'</code>        | Delivery/read status for own messages: 'sending' \| 'sent' \| 'delivered' \| 'read' |
+| **`readBy`**         | <code>string[]</code>                                            | User IDs that have read this event                                                  |
 
 
 #### UserProfile

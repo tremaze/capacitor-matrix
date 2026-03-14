@@ -269,6 +269,40 @@
       .room-item:hover { background: var(--bg-sidebar-hover); }
       .room-item.active { background: var(--bg-sidebar-active); }
 
+      .room-list-header {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+        padding: 12px 12px 4px;
+      }
+      .room-list-divider {
+        height: 1px;
+        background: var(--border);
+        margin: 8px 12px;
+      }
+      .room-item-invite {
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        margin-bottom: 4px;
+      }
+      .invite-btn {
+        width: 32px; height: 32px;
+        border-radius: 50%;
+        border: none;
+        cursor: pointer;
+        font-size: 16px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: opacity 0.15s;
+      }
+      .invite-btn:hover { opacity: 0.8; }
+      .invite-accept { background: var(--green); color: white; }
+      .invite-decline { background: var(--red); color: white; }
+
       .room-avatar {
         width: 42px; height: 42px;
         border-radius: 12px;
@@ -527,6 +561,45 @@
         margin-top: 4px;
         text-align: right;
         opacity: 0.5;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 4px;
+      }
+      .msg-status {
+        font-size: 12px;
+        opacity: 1;
+        letter-spacing: -3px;
+        margin-left: 2px;
+      }
+      /* Inside own bubbles, override the parent's opacity for better contrast */
+      .msg-group.mine .msg-time { opacity: 0.85; }
+      .msg-status.sending { color: rgba(255,255,255,0.7); }
+      .msg-status.sent { color: rgba(255,255,255,0.9); }
+      .msg-status.delivered { color: rgba(255,255,255,0.9); }
+      .msg-status.read { color: #90ee90; }
+      /* For other people's messages (light bubbles) */
+      .msg-group.other .msg-status.sending { color: #999; }
+      .msg-group.other .msg-status.sent { color: #666; }
+      .msg-group.other .msg-status.delivered { color: #666; }
+      .msg-group.other .msg-status.read { color: #4fc3f7; }
+
+      .msg-read-receipts {
+        display: flex;
+        gap: 2px;
+        margin-top: 4px;
+        justify-content: flex-end;
+      }
+      .msg-group.other .msg-read-receipts { justify-content: flex-start; }
+      .read-receipt-avatar {
+        width: 16px; height: 16px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 7px;
+        font-weight: 700;
+        color: white;
       }
 
       .msg-actions-bar {
@@ -561,8 +634,14 @@
         border-radius: 10px;
         padding: 2px 7px;
       }
+      .reaction-chip.mine {
+        outline: 2px solid var(--accent);
+      }
       .msg-group.mine .reaction-chip {
         background: rgba(255,255,255,0.15);
+      }
+      .msg-group.mine .reaction-chip.mine {
+        outline-color: rgba(255,255,255,0.5);
       }
 
       .msg-system {
@@ -1366,6 +1445,10 @@
             <button class="drawer-btn drawer-btn-danger" onclick="doBanUser()">Ban</button>
             <button class="drawer-btn drawer-btn-secondary" onclick="doUnbanUser()">Unban</button>
           </div>
+        </div>
+        <div class="drawer-section">
+          <div class="drawer-section-title">Encryption</div>
+          <div id="encryptionDetails" style="font-size:13px;color:var(--text-muted)">Loading...</div>
         </div>
         <div class="drawer-section" style="margin-top:32px">
           <button class="drawer-btn drawer-btn-danger" onclick="doLeaveRoom()" style="width:100%;padding:12px">Leave Room</button>

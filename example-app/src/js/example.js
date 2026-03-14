@@ -292,6 +292,7 @@ function registerListeners() {
     log(`Event ${evt?.type} from ${evt?.senderId}: ${JSON.stringify(evt?.content)}`, 'event');
     if (evt && evt.roomId === selectedRoomId) {
       if (evt.type === 'm.room.redaction') {
+        // Web sends redaction event with content.redacts pointing to target
         const redactedId = evt.content?.redacts || evt.redacts;
         if (redactedId) {
           const el = document.querySelector(`[data-event-id="${redactedId}"]`);
@@ -300,31 +301,49 @@ function registerListeners() {
             el.className = 'msg-system';
           }
         }
-        return;
-      }
-      if (evt.type === 'm.reaction') {
-        const rel = evt.content?.['m.relates_to'];
-        log(`Reaction rel: ${JSON.stringify(rel)}`, 'event');
-        // Skip own reactions — already added optimistically by doReact
-        if (evt.senderId === currentUserId) return;
-        if (rel?.event_id && rel?.key) {
-          addReactionChip(rel.event_id, rel.key);
+        // Android sends the redacted event itself (Set diff) with its own eventId
+        if (evt.eventId) {
+          const el = document.querySelector(`[data-event-id="${evt.eventId}"]`);
+          if (el) {
+            el.innerHTML = '<em style="color:var(--text-muted)">Message deleted</em>';
+            el.className = 'msg-system';
+          }
         }
         return;
       }
-      // If event already exists, update reactions (Android sends Set diffs for reaction changes)
-      if (evt.eventId && document.querySelector(`[data-event-id="${evt.eventId}"]`)) {
+      if (evt.type === 'm.reaction') {
+        // Reactions are handled via re-emitted parent event with aggregated reactions
+        return;
+      }
+      // If event already exists, update it (decryption, reactions, status)
+      const existingEl = evt.eventId && document.querySelector(`[data-event-id="${evt.eventId}"]`);
+      if (existingEl) {
+        // If the message was a decryption placeholder, replace it in-place (preserve order)
+        const bubble = existingEl.querySelector('.msg-bubble');
+        if (bubble && evt.type === 'm.room.message' && bubble.textContent?.includes('Decrypting')) {
+          const parent = existingEl.parentNode;
+          const nextSibling = existingEl.nextSibling;
+          existingEl.remove();
+          renderMessage(evt, nextSibling);
+          return;
+        }
         const aggReactions = evt.content?.reactions;
         if (Array.isArray(aggReactions)) {
           const container = document.getElementById(`reactions-${evt.eventId}`);
           if (container) {
             container.innerHTML = '';
             for (const r of aggReactions) {
+              const senders = r.senders || [];
               for (let i = 0; i < (r.count || 1); i++) {
-                addReactionChip(evt.eventId, r.key);
+                const isMine = senders[i] === currentUserId;
+                addReactionChip(evt.eventId, r.key, isMine);
               }
             }
           }
+        }
+        // Update delivery/read status live
+        if (evt.status) {
+          updateMsgStatus(evt.eventId, evt.status);
         }
         return;
       }
@@ -339,6 +358,20 @@ function registerListeners() {
   Matrix.addListener('roomUpdated', (data) => {
     log(`Room updated: ${data.roomId}`, 'event');
     refreshRoomListDebounced();
+  });
+
+  Matrix.addListener('receiptReceived', (data) => {
+    if (data.roomId === selectedRoomId) {
+      // Update all own messages in view — check if any are now "read"
+      document.querySelectorAll('.msg-group.mine').forEach((el) => {
+        const eid = el.dataset.eventId;
+        if (!eid || eid.startsWith('~!')) return;
+        const statusEl = el.querySelector('.msg-status');
+        if (statusEl && !statusEl.classList.contains('read')) {
+          updateMsgStatus(eid, 'read');
+        }
+      });
+    }
   });
 
   Matrix.addListener('typingChanged', (data) => {
@@ -826,7 +859,50 @@ window.doGetRooms = async () => {
 function renderRoomList(rooms) {
   const list = document.getElementById('roomList');
   list.innerHTML = '';
-  rooms.forEach((room) => {
+
+  // Separate invitations from joined rooms
+  const invites = rooms.filter((r) => r.membership === 'invite');
+  const joined = rooms.filter((r) => r.membership !== 'invite');
+
+  // Render invitations at the top
+  if (invites.length > 0) {
+    const header = document.createElement('li');
+    header.className = 'room-list-header';
+    header.textContent = `Invitations (${invites.length})`;
+    list.appendChild(header);
+
+    invites.forEach((room) => {
+      const li = document.createElement('li');
+      li.className = 'room-item room-item-invite';
+      li.dataset.roomId = room.roomId;
+
+      const color = roomColor(room.roomId);
+      const initials = roomInitials(room.name);
+      const encIcon = room.isEncrypted ? '<span class="room-encrypted-icon">&#128274;</span>' : '';
+
+      li.innerHTML = `
+        <div class="room-avatar" style="background:${color}">${initials}</div>
+        <div class="room-item-info">
+          <div class="room-item-name">${esc(room.name || '(unnamed)')}${encIcon}</div>
+          <div class="room-item-preview">Invited</div>
+        </div>
+        <div class="room-item-meta" style="display:flex;gap:6px">
+          <button class="invite-btn invite-accept" title="Accept">&#10003;</button>
+          <button class="invite-btn invite-decline" title="Decline">&#10005;</button>
+        </div>
+      `;
+      li.querySelector('.invite-accept').onclick = (e) => { e.stopPropagation(); doAcceptInvite(room.roomId); };
+      li.querySelector('.invite-decline').onclick = (e) => { e.stopPropagation(); doDeclineInvite(room.roomId); };
+      list.appendChild(li);
+    });
+
+    const divider = document.createElement('li');
+    divider.className = 'room-list-divider';
+    list.appendChild(divider);
+  }
+
+  // Render joined rooms
+  joined.forEach((room) => {
     const li = document.createElement('li');
     li.className = `room-item${room.roomId === selectedRoomId ? ' active' : ''}`;
     li.dataset.roomId = room.roomId;
@@ -846,6 +922,28 @@ function renderRoomList(rooms) {
     li.onclick = () => selectRoom(room);
     list.appendChild(li);
   });
+}
+
+async function doAcceptInvite(roomId) {
+  try {
+    log(`Accepting invite for ${roomId}...`);
+    await Matrix.joinRoom({ roomIdOrAlias: roomId });
+    log('Invite accepted', 'success');
+    window.doGetRooms();
+  } catch (e) {
+    logError('acceptInvite', e);
+  }
+}
+
+async function doDeclineInvite(roomId) {
+  try {
+    log(`Declining invite for ${roomId}...`);
+    await Matrix.leaveRoom({ roomId });
+    log('Invite declined', 'success');
+    window.doGetRooms();
+  } catch (e) {
+    logError('declineInvite', e);
+  }
 }
 
 function selectRoom(room) {
@@ -928,9 +1026,46 @@ window.doGetRoomMembers = async () => {
 
 // ── Room Drawer ───────────────────────────────────────
 
-window.openRoomDrawer = () => {
+window.openRoomDrawer = async () => {
   document.getElementById('roomDrawerOverlay').classList.add('active');
   document.getElementById('roomDrawer').classList.add('active');
+  // Load encryption details
+  const el = document.getElementById('encryptionDetails');
+  el.textContent = 'Loading...';
+  try {
+    const rooms = (await Matrix.getRooms()).rooms || [];
+    const room = rooms.find((r) => r.roomId === selectedRoomId);
+    const isEncrypted = room?.isEncrypted ?? false;
+
+    const status = await Matrix.getEncryptionStatus();
+    const backup = await Matrix.getKeyBackupStatus();
+    let recoveryEnabled = false;
+    try {
+      recoveryEnabled = (await Matrix.isRecoveryEnabled()).enabled;
+    } catch {
+      // may not be supported
+    }
+
+    const cs = status.crossSigningStatus;
+    const badge = (val) => val
+      ? '<span style="color:var(--green)">✓</span>'
+      : '<span style="color:var(--red)">✗</span>';
+
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr auto;gap:6px 12px;align-items:center">
+        <span>Room encrypted</span>${badge(isEncrypted)}
+        <span>Cross-signing ready</span>${badge(status.isCrossSigningReady)}
+        <span style="padding-left:12px">Master key</span>${badge(cs.hasMaster)}
+        <span style="padding-left:12px">Self-signing key</span>${badge(cs.hasSelfSigning)}
+        <span style="padding-left:12px">User-signing key</span>${badge(cs.hasUserSigning)}
+        <span>Key backup</span>${badge(backup.enabled)}
+        <span>Secret storage</span>${badge(status.isSecretStorageReady)}
+        <span>Recovery</span>${badge(recoveryEnabled)}
+      </div>
+    `;
+  } catch (e) {
+    el.textContent = 'Error loading encryption details: ' + (e.message || e);
+  }
 };
 
 window.closeRoomDrawer = () => {
@@ -965,31 +1100,19 @@ async function loadConversation() {
       msgList.innerHTML = '<div class="msg-system">No messages yet. Say hello!</div>';
       return;
     }
-    // Separate reactions from other events
-    const reactions = [];
-    const displayEvents = [];
-    for (const evt of events) {
-      if (evt.type === 'm.reaction') {
-        reactions.push(evt);
-      } else {
-        displayEvents.push(evt);
-      }
-    }
+    // Filter out non-displayable events
+    const hiddenTypes = ['m.reaction'];
+    const displayEvents = events.filter((evt) => !hiddenTypes.includes(evt.type));
     displayEvents.forEach((evt) => renderMessage(evt));
-    // Apply reactions from web (separate m.reaction events)
-    for (const r of reactions) {
-      const rel = r.content?.['m.relates_to'];
-      if (rel?.event_id && rel?.key) {
-        addReactionChip(rel.event_id, rel.key);
-      }
-    }
-    // Apply reactions from Android (aggregated in content.reactions)
+    // Apply aggregated reactions (works for both web and Android)
     for (const evt of displayEvents) {
       const aggReactions = evt.content?.reactions;
       if (Array.isArray(aggReactions) && evt.eventId) {
         for (const r of aggReactions) {
+          const senders = r.senders || [];
           for (let i = 0; i < (r.count || 1); i++) {
-            addReactionChip(evt.eventId, r.key);
+            const isMine = senders[i] === currentUserId;
+            addReactionChip(evt.eventId, r.key, isMine);
           }
         }
       }
@@ -1006,20 +1129,46 @@ async function loadMessages(roomId) {
   await loadConversation();
 }
 
-function renderMessage(evt) {
+function renderMessage(evt, insertBefore = null) {
   const msgList = document.getElementById('messageList');
   const isMine = evt.senderId === currentUserId;
 
-  // State events
-  if (evt.type !== 'm.room.message') {
+  // Skip non-displayable event types
+  const hiddenTypes = ['m.reaction'];
+  if (hiddenTypes.includes(evt.type)) return;
+
+  // Redacted messages — show as "Message deleted"
+  if (evt.type === 'm.room.redaction') {
+    const sys = document.createElement('div');
+    sys.className = 'msg-system';
+    if (evt.eventId) sys.dataset.eventId = evt.eventId;
+    sys.innerHTML = '<em style="color:var(--text-muted)">Message deleted</em>';
+    if (insertBefore) {
+      msgList.insertBefore(sys, insertBefore);
+    } else {
+      msgList.appendChild(sys);
+    }
+    return;
+  }
+
+  // State events (but not encrypted messages — those will be decrypted)
+  if (evt.type !== 'm.room.message' && evt.type !== 'm.room.encrypted') {
     const sys = document.createElement('div');
     sys.className = 'msg-system';
     const label = evt.type === 'm.room.member' ? `${evt.senderId} ${evt.content?.membership || 'updated'}` :
-                  evt.type === 'm.room.encrypted' ? 'Encrypted event' :
                   `${evt.type}`;
     sys.textContent = label;
-    msgList.appendChild(sys);
+    if (insertBefore) {
+      msgList.insertBefore(sys, insertBefore);
+    } else {
+      msgList.appendChild(sys);
+    }
     return;
+  }
+
+  // For encrypted events still being decrypted, show a placeholder
+  if (evt.type === 'm.room.encrypted') {
+    evt.content = { ...evt.content, body: '🔒 Decrypting...', msgtype: 'm.text' };
   }
 
   const group = document.createElement('div');
@@ -1058,7 +1207,21 @@ function renderMessage(evt) {
     bubbleHtml += esc(body);
   }
 
-  bubbleHtml += `<div class="msg-time">${time}</div>`;
+  // Status indicator for own messages
+  let statusHtml = '';
+  if (isMine && evt.status) {
+    if (evt.status === 'sending') {
+      statusHtml = '<span class="msg-status sending" title="Sending" style="letter-spacing:0">&#128336;</span>'; // 🕐
+    } else if (evt.status === 'sent') {
+      statusHtml = '<span class="msg-status sent" title="Sent">&#10003;</span>'; // ✓
+    } else if (evt.status === 'delivered') {
+      statusHtml = '<span class="msg-status delivered" title="Delivered">&#10003;&#10003;</span>'; // ✓✓
+    } else if (evt.status === 'read') {
+      statusHtml = '<span class="msg-status read" title="Read">&#10003;&#10003;</span>'; // ✓✓ blue
+    }
+  }
+
+  bubbleHtml += `<div class="msg-time">${time}${statusHtml}</div>`;
 
   // Actions
   let actionsHtml = '';
@@ -1074,15 +1237,36 @@ function renderMessage(evt) {
     actionsHtml += `<div class="msg-reactions-bar" id="reactions-${evt.eventId}"></div>`;
   }
 
+  // Read receipt avatars
+  let readByHtml = '';
+  if (evt.readBy && evt.readBy.length > 0) {
+    const avatars = evt.readBy
+      .filter((uid) => uid !== evt.senderId)
+      .map((uid) => {
+        const initials = uid.replace('@', '').substring(0, 2).toUpperCase();
+        const c = roomColor(uid);
+        return `<span class="read-receipt-avatar" style="background:${c}" title="${esc(uid)}">${initials}</span>`;
+      })
+      .join('');
+    if (avatars) {
+      readByHtml = `<div class="msg-read-receipts">${avatars}</div>`;
+    }
+  }
+
   group.innerHTML = `
     <div class="msg-avatar" style="background:${color}">${senderInitials}</div>
     <div class="msg-content-wrap">
       <div class="msg-sender-name">${esc(evt.senderId)}</div>
       <div class="msg-bubble">${bubbleHtml}</div>
       ${actionsHtml}
+      ${readByHtml}
     </div>
   `;
-  msgList.appendChild(group);
+  if (insertBefore) {
+    msgList.insertBefore(group, insertBefore);
+  } else {
+    msgList.appendChild(group);
+  }
 }
 
 async function resolveMediaUrl(mxcUrl) {
@@ -1105,14 +1289,51 @@ window.downloadMedia = (el, event) => {
   if (el.href && el.href !== '#') window.open(el.href);
 };
 
-function addReactionChip(eventId, key) {
+function updateMsgStatus(eventId, status) {
+  const el = document.querySelector(`[data-event-id="${eventId}"]`);
+  if (!el) return;
+  const statusEl = el.querySelector('.msg-status');
+  if (status === 'sent') {
+    if (statusEl) {
+      statusEl.className = 'msg-status sent';
+      statusEl.title = 'Sent';
+      statusEl.innerHTML = '&#10003;';
+      statusEl.style.letterSpacing = '-3px';
+    }
+  } else if (status === 'read') {
+    if (statusEl) {
+      statusEl.className = 'msg-status read';
+      statusEl.title = 'Read';
+      statusEl.innerHTML = '&#10003;&#10003;';
+      statusEl.style.letterSpacing = '-3px';
+    }
+  }
+}
+
+function addReactionChip(eventId, key, isMine = false) {
   const container = document.getElementById(`reactions-${eventId}`);
   if (!container) return;
   const chip = document.createElement('span');
-  chip.className = 'reaction-chip';
+  chip.className = `reaction-chip${isMine ? ' mine' : ''}`;
+  chip.dataset.key = key;
   chip.textContent = key;
   container.appendChild(chip);
 }
+
+function rebuildReactionChips(eventId, reactions) {
+  const container = document.getElementById(`reactions-${eventId}`);
+  if (!container) return;
+  container.innerHTML = '';
+  if (!Array.isArray(reactions)) return;
+  for (const r of reactions) {
+    const senders = r.senders || [];
+    for (let i = 0; i < (r.count || 1); i++) {
+      const isMine = senders[i] === currentUserId;
+      addReactionChip(eventId, r.key, isMine);
+    }
+  }
+}
+
 
 function esc(s) {
   const d = document.createElement('div');
@@ -1133,6 +1354,34 @@ window.doSendMessage = async () => {
   try {
     const result = await Matrix.sendMessage({ roomId: selectedRoomId, body });
     log(`Sent: ${result.eventId}`, 'success');
+    // Upgrade the SDK's local echo element (with ~! prefix) to the real server event ID
+    if (result.eventId) {
+      const localEchoEl = document.querySelector('[data-event-id^="~!"]');
+      if (localEchoEl) {
+        const oldId = localEchoEl.dataset.eventId;
+        localEchoEl.dataset.eventId = result.eventId;
+        // Update reaction buttons and container to use the real event ID
+        const wrap = localEchoEl.querySelector('.msg-content-wrap');
+        if (wrap) {
+          const actionsBar = wrap.querySelector('.msg-actions-bar');
+          if (actionsBar) {
+            actionsBar.innerHTML = `
+              <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F44D}')">&#128077;</button>
+              <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u2764\\uFE0F')">&#10084;&#65039;</button>
+              <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F602}')">&#128514;</button>
+              <button class="msg-action-btn" onclick="doRedact('${result.eventId}')" title="Delete" style="color:var(--red)">&#10005;</button>
+            `;
+          }
+          const reactionsBar = wrap.querySelector('.msg-reactions-bar');
+          if (reactionsBar) {
+            reactionsBar.id = `reactions-${result.eventId}`;
+          }
+        }
+        log(`Upgraded ${oldId} -> ${result.eventId}`, 'success');
+      }
+      // Update status from sending → sent
+      updateMsgStatus(result.eventId, 'sent');
+    }
   } catch (e) {
     logError('sendMessage', e);
   }
@@ -1157,8 +1406,14 @@ window.doRedact = async (eventId) => {
 
 window.doReact = async (eventId, key) => {
   if (!selectedRoomId) return;
-  // Add chip optimistically before the network call
-  addReactionChip(eventId, key);
+  const container = document.getElementById(`reactions-${eventId}`);
+  // Check if we already have this reaction from ourselves — toggle off
+  const existingChip = container && container.querySelector(`.reaction-chip.mine[data-key="${key}"]`);
+  if (existingChip) {
+    existingChip.remove();
+  } else {
+    addReactionChip(eventId, key, true);
+  }
   const msgList = document.getElementById('messageList');
   msgList.scrollTop = msgList.scrollHeight;
   try {
