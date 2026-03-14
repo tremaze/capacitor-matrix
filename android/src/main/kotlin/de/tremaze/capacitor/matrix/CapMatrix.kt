@@ -52,6 +52,9 @@ class MatrixSDKBridge(private val context: Context) {
     private var syncService: SyncService? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val subscribedRoomIds = mutableSetOf<String>()
+    private val roomTimelines = mutableMapOf<String, org.matrix.rustcomponents.sdk.Timeline>()
+    // Keep strong references to listener handles so GC doesn't cancel the subscriptions
+    private val timelineListenerHandles = mutableListOf<Any>()
 
     private val sessionStore by lazy { MatrixSessionStore(context) }
 
@@ -126,6 +129,9 @@ class MatrixSDKBridge(private val context: Context) {
     suspend fun logout() {
         syncService?.stop()
         syncService = null
+        timelineListenerHandles.clear()
+        roomTimelines.clear()
+        subscribedRoomIds.clear()
         client?.logout()
         client = null
         sessionStore.clear()
@@ -134,6 +140,9 @@ class MatrixSDKBridge(private val context: Context) {
     fun clearAllData() {
         syncService = null
         client = null
+        timelineListenerHandles.clear()
+        roomTimelines.clear()
+        subscribedRoomIds.clear()
         sessionStore.clear()
         val sdkDir = context.filesDir.resolve("matrix_sdk")
         sdkDir.deleteRecursively()
@@ -180,37 +189,53 @@ class MatrixSDKBridge(private val context: Context) {
             if (subscribedRoomIds.contains(roomId)) continue
             subscribedRoomIds.add(roomId)
             try {
-                val timeline = room.timeline()
-                timeline.addListener(object : TimelineListener {
+                val timeline = getOrCreateTimeline(room)
+                val handle = timeline.addListener(object : TimelineListener {
                     override fun onUpdate(diff: List<TimelineDiff>) {
-                        for (d in diff) {
-                            // Only fire for new events (PushBack/Append), not initial loads
-                            when (d) {
-                                is TimelineDiff.PushBack -> {
-                                    serializeTimelineItem(d.value, roomId)?.let { event ->
-                                        onMessage(event)
-                                    }
-                                    onRoomUpdate(roomId, mapOf("roomId" to roomId))
-                                }
-                                is TimelineDiff.Append -> {
-                                    d.values.forEach { item ->
-                                        serializeTimelineItem(item, roomId)?.let { event ->
-                                            onMessage(event)
+                        android.util.Log.d("CapMatrix", "onUpdate for $roomId: ${diff.size} diffs")
+                        try {
+                            for (d in diff) {
+                                val diffType = d::class.simpleName
+                                android.util.Log.d("CapMatrix", "  diff type: $diffType")
+                                when (d) {
+                                    is TimelineDiff.PushBack -> {
+                                        // Skip local echoes (TransactionId) — the Set diff
+                                        // will follow with the real EventId
+                                        val isLocalEcho = d.value.asEvent()?.eventOrTransactionId is EventOrTransactionId.TransactionId
+                                        if (isLocalEcho) {
+                                            android.util.Log.d("CapMatrix", "  PushBack skipped (local echo)")
+                                        } else {
+                                            val event = serializeTimelineItem(d.value, roomId)
+                                            android.util.Log.d("CapMatrix", "  PushBack serialized: ${event?.get("eventId")} type=${event?.get("type")}")
+                                            event?.let { onMessage(it) }
                                         }
+                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
                                     }
-                                    onRoomUpdate(roomId, mapOf("roomId" to roomId))
-                                }
-                                is TimelineDiff.Set -> {
-                                    // Set means an existing item was updated (e.g. reactions changed)
-                                    serializeTimelineItem(d.value, roomId)?.let { event ->
-                                        onMessage(event)
+                                    is TimelineDiff.Append -> {
+                                        d.values.forEach { item ->
+                                            val event = serializeTimelineItem(item, roomId)
+                                            android.util.Log.d("CapMatrix", "  Append serialized: ${event?.get("eventId")} type=${event?.get("type")}")
+                                            event?.let { onMessage(it) }
+                                        }
+                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                    }
+                                    is TimelineDiff.Set -> {
+                                        val event = serializeTimelineItem(d.value, roomId)
+                                        android.util.Log.d("CapMatrix", "  Set serialized: ${event?.get("eventId")} type=${event?.get("type")} reactions=${(event?.get("content") as? Map<*,*>)?.get("reactions")}")
+                                        event?.let { onMessage(it) }
+                                    }
+                                    else -> {
+                                        android.util.Log.d("CapMatrix", "  Ignored diff type: $diffType")
                                     }
                                 }
-                                else -> {}
                             }
+                            android.util.Log.d("CapMatrix", "onUpdate for $roomId completed successfully")
+                        } catch (e: Exception) {
+                            android.util.Log.e("CapMatrix", "Error in timeline listener for $roomId: ${e.message}", e)
                         }
                     }
                 })
+                timelineListenerHandles.add(handle)
                 android.util.Log.d("CapMatrix", "Subscribed to timeline for room $roomId")
             } catch (e: Exception) {
                 android.util.Log.e("CapMatrix", "Failed to subscribe to room $roomId: ${e.message}")
@@ -221,6 +246,8 @@ class MatrixSDKBridge(private val context: Context) {
     suspend fun stopSync() {
         syncService?.stop()
         subscribedRoomIds.clear()
+        timelineListenerHandles.clear()
+        roomTimelines.clear()
     }
 
     fun getSyncState(): String {
@@ -299,7 +326,7 @@ class MatrixSDKBridge(private val context: Context) {
     suspend fun sendMessage(roomId: String, body: String, msgtype: String): String {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
-        val timeline = room.timeline()
+        val timeline = getOrCreateTimeline(room)
 
         val content = messageEventContentFromMarkdown(body)
         timeline.send(content)
@@ -313,6 +340,8 @@ class MatrixSDKBridge(private val context: Context) {
     suspend fun getRoomMessages(roomId: String, limit: Int?, from: String?): Map<String, Any?> {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        // Use a fresh timeline for pagination — NOT the cached one used for sync,
+        // because handle.cancel() below would kill the sync listener too.
         val timeline = room.timeline()
         val requestedLimit = limit ?: 20
 
@@ -340,7 +369,7 @@ class MatrixSDKBridge(private val context: Context) {
     suspend fun markRoomAsRead(roomId: String, eventId: String) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
-        room.timeline().markAsRead(receiptType = ReceiptType.READ)
+        getOrCreateTimeline(room).markAsRead(receiptType = ReceiptType.READ)
     }
 
     // ── Redactions & Reactions ─────────────────────────────
@@ -348,14 +377,14 @@ class MatrixSDKBridge(private val context: Context) {
     suspend fun redactEvent(roomId: String, eventId: String, reason: String?) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
-        val timeline = room.timeline()
+        val timeline = getOrCreateTimeline(room)
         timeline.redactEvent(EventOrTransactionId.EventId(eventId), reason)
     }
 
     suspend fun sendReaction(roomId: String, eventId: String, key: String) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
-        val timeline = room.timeline()
+        val timeline = getOrCreateTimeline(room)
         timeline.toggleReaction(EventOrTransactionId.EventId(eventId), key)
     }
 
@@ -540,6 +569,10 @@ class MatrixSDKBridge(private val context: Context) {
 
     private fun requireClient(): Client {
         return client ?: throw IllegalStateException("Not logged in. Call login() or loginWithToken() first.")
+    }
+
+    private suspend fun getOrCreateTimeline(room: Room): org.matrix.rustcomponents.sdk.Timeline {
+        return roomTimelines.getOrPut(room.id()) { room.timeline() }
     }
 
     private suspend fun serializeRoom(room: Room): Map<String, Any?> {

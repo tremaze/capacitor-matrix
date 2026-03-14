@@ -328,13 +328,6 @@ function registerListeners() {
         }
         return;
       }
-      // For own messages, skip the SDK's local echo (it has a temp ID that
-      // won't work for reactions). The optimistic placeholder stays until
-      // doSendMessage resolves with the real server eventId.
-      if (evt.senderId === currentUserId) {
-        const hasLocalPlaceholder = document.querySelector('[data-event-id^="local-"]');
-        if (hasLocalPlaceholder) return;
-      }
       renderMessage(evt);
       const msgList = document.getElementById('messageList');
       msgList.scrollTop = msgList.scrollHeight;
@@ -1136,43 +1129,10 @@ window.doSendMessage = async () => {
   if (!body) return;
 
   input.value = '';
-  renderMessage({
-    eventId: 'local-' + Date.now(),
-    roomId: selectedRoomId,
-    senderId: currentUserId,
-    type: 'm.room.message',
-    content: { body, msgtype: 'm.text' },
-    originServerTs: Date.now(),
-  });
-  const msgList = document.getElementById('messageList');
-  msgList.scrollTop = msgList.scrollHeight;
 
   try {
     const result = await Matrix.sendMessage({ roomId: selectedRoomId, body });
     log(`Sent: ${result.eventId}`, 'success');
-    // Upgrade the optimistic placeholder with the real server eventId + action buttons
-    const localEl = document.querySelector('[data-event-id^="local-"]');
-    if (localEl) {
-      localEl.dataset.eventId = result.eventId;
-      // Add action/reaction buttons directly into .msg-content-wrap (no wrapper div)
-      const wrap = localEl.querySelector('.msg-content-wrap');
-      if (wrap) {
-        const actionsBar = document.createElement('div');
-        actionsBar.className = 'msg-actions-bar';
-        actionsBar.innerHTML = `
-          <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F44D}')">&#128077;</button>
-          <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u2764\\uFE0F')">&#10084;&#65039;</button>
-          <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F602}')">&#128514;</button>
-          <button class="msg-action-btn" onclick="doRedact('${result.eventId}')" title="Delete" style="color:var(--red)">&#10005;</button>
-        `;
-        wrap.appendChild(actionsBar);
-
-        const reactionsBar = document.createElement('div');
-        reactionsBar.className = 'msg-reactions-bar';
-        reactionsBar.id = `reactions-${result.eventId}`;
-        wrap.appendChild(reactionsBar);
-      }
-    }
   } catch (e) {
     logError('sendMessage', e);
   }

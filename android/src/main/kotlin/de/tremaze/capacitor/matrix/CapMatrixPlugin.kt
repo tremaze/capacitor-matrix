@@ -99,7 +99,14 @@ class MatrixPlugin : Plugin() {
                         notifyListeners("syncStateChange", JSObject().put("state", state))
                     },
                     onMessage = { event ->
-                        notifyListeners("messageReceived", JSObject().put("event", mapToJSObject(event)))
+                        try {
+                            val jsEvent = mapToJSObject(event)
+                            android.util.Log.d("CapMatrix", "notifyListeners messageReceived: eventId=${event["eventId"]} type=${event["type"]}")
+                            notifyListeners("messageReceived", JSObject().put("event", jsEvent))
+                            android.util.Log.d("CapMatrix", "notifyListeners messageReceived: done")
+                        } catch (e: Exception) {
+                            android.util.Log.e("CapMatrix", "Error in onMessage callback: ${e.message}", e)
+                        }
                     },
                     onRoomUpdate = { roomId, summary ->
                         notifyListeners(

@@ -20,7 +20,8 @@
     "cap:build:ios": "cap build ios",
     "build:android": "vite build && cap sync android",
     "build:ios": "vite build && cap sync ios",
-    "build:native": "vite build && cap sync"
+    "build:native": "vite build && cap sync",
+    "build:watch": "npx -y nodemon --watch src -e js,html,css --exec \"npm run build:native || true\""
   },
   "dependencies": {
     "@capacitor/android": "8.0.0",

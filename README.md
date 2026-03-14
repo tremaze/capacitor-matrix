@@ -322,6 +322,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`unbanUser(...)`](#unbanuser)
 * [`sendTyping(...)`](#sendtyping)
 * [`getMediaUrl(...)`](#getmediaurl)
+* [`searchUsers(...)`](#searchusers)
 * [`setPresence(...)`](#setpresence)
 * [`getPresence(...)`](#getpresence)
 * [`initializeCrypto()`](#initializecrypto)
@@ -674,6 +675,21 @@ getMediaUrl(options: { mxcUrl: string; }) => Promise<{ httpUrl: string; }>
 --------------------
 
 
+### searchUsers(...)
+
+```typescript
+searchUsers(options: { searchTerm: string; limit?: number; }) => Promise<{ results: UserProfile[]; limited: boolean; }>
+```
+
+| Param         | Type                                                 |
+| ------------- | ---------------------------------------------------- |
+| **`options`** | <code>{ searchTerm: string; limit?: number; }</code> |
+
+**Returns:** <code>Promise&lt;{ results: UserProfile[]; limited: boolean; }&gt;</code>
+
+--------------------
+
+
 ### setPresence(...)
 
 ```typescript
@@ -1004,6 +1020,15 @@ removeAllListeners() => Promise<void>
 | **`originServerTs`** | <code>number</code>                                              |
 
 
+#### UserProfile
+
+| Prop              | Type                |
+| ----------------- | ------------------- |
+| **`userId`**      | <code>string</code> |
+| **`displayName`** | <code>string</code> |
+| **`avatarUrl`**   | <code>string</code> |
+
+
 #### PresenceInfo
 
 | Prop                | Type                                                |
@@ -1100,7 +1125,7 @@ removeAllListeners() => Promise<void>
 
 Construct a type with a set of properties K of type T
 
-<code>{ [P in K]: T; }</code>
+<code>{ [P in K]: T; }</code>
 
 </docgen-api>
 
