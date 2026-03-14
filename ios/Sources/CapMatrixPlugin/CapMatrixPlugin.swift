@@ -48,7 +48,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getPresence", returnType: CAPPluginReturnPromise),
     ]
 
-    private let bridge = MatrixSDKBridge()
+    private let matrixBridge = MatrixSDKBridge()
 
     @objc func login(_ call: CAPPluginCall) {
         guard let homeserverUrl = call.getString("homeserverUrl"),
@@ -59,7 +59,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let session = try await bridge.login(homeserverUrl: homeserverUrl, userId: userId, password: password)
+                let session = try await matrixBridge.login(homeserverUrl: homeserverUrl, userId: userId, password: password)
                 call.resolve(session)
             } catch {
                 call.reject(error.localizedDescription)
@@ -77,7 +77,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let session = try await bridge.loginWithToken(
+                let session = try await matrixBridge.loginWithToken(
                     homeserverUrl: homeserverUrl,
                     accessToken: accessToken,
                     userId: userId,
@@ -93,7 +93,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func logout(_ call: CAPPluginCall) {
         Task {
             do {
-                try await bridge.logout()
+                try await matrixBridge.logout()
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -102,7 +102,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func getSession(_ call: CAPPluginCall) {
-        if let session = bridge.getSession() {
+        if let session = matrixBridge.getSession() {
             call.resolve(session)
         } else {
             call.resolve([:])
@@ -112,7 +112,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func startSync(_ call: CAPPluginCall) {
         Task {
             do {
-                try await bridge.startSync(
+                try await matrixBridge.startSync(
                     onSyncState: { [weak self] state in
                         self?.notifyListeners("syncStateChange", data: ["state": state])
                     },
@@ -133,7 +133,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func stopSync(_ call: CAPPluginCall) {
         Task {
             do {
-                try await bridge.stopSync()
+                try await matrixBridge.stopSync()
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -142,16 +142,18 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func getSyncState(_ call: CAPPluginCall) {
-        let state = bridge.getSyncState()
+        let state = matrixBridge.getSyncState()
         call.resolve(["state": state])
     }
 
     @objc func getRooms(_ call: CAPPluginCall) {
-        do {
-            let rooms = try bridge.getRooms()
-            call.resolve(["rooms": rooms])
-        } catch {
-            call.reject(error.localizedDescription)
+        Task {
+            do {
+                let rooms = try await matrixBridge.getRooms()
+                call.resolve(["rooms": rooms])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
         }
     }
 
@@ -162,7 +164,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let members = try await bridge.getRoomMembers(roomId: roomId)
+                let members = try await matrixBridge.getRoomMembers(roomId: roomId)
                 call.resolve(["members": members])
             } catch {
                 call.reject(error.localizedDescription)
@@ -177,7 +179,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let roomId = try await bridge.joinRoom(roomIdOrAlias: roomIdOrAlias)
+                let roomId = try await matrixBridge.joinRoom(roomIdOrAlias: roomIdOrAlias)
                 call.resolve(["roomId": roomId])
             } catch {
                 call.reject(error.localizedDescription)
@@ -192,7 +194,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.leaveRoom(roomId: roomId)
+                try await matrixBridge.leaveRoom(roomId: roomId)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -209,7 +211,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let eventId = try await bridge.sendMessage(roomId: roomId, body: body, msgtype: msgtype)
+                let eventId = try await matrixBridge.sendMessage(roomId: roomId, body: body, msgtype: msgtype)
                 call.resolve(["eventId": eventId])
             } catch {
                 call.reject(error.localizedDescription)
@@ -226,7 +228,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let result = try await bridge.getRoomMessages(roomId: roomId, limit: limit, from: from)
+                let result = try await matrixBridge.getRoomMessages(roomId: roomId, limit: limit, from: from)
                 call.resolve(result)
             } catch {
                 call.reject(error.localizedDescription)
@@ -242,7 +244,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.markRoomAsRead(roomId: roomId, eventId: eventId)
+                try await matrixBridge.markRoomAsRead(roomId: roomId, eventId: eventId)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -258,7 +260,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let roomId = try await bridge.createRoom(
+                let roomId = try await matrixBridge.createRoom(
                     name: name,
                     topic: topic,
                     isEncrypted: isEncrypted,
@@ -274,7 +276,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func initializeCrypto(_ call: CAPPluginCall) {
         Task {
             do {
-                try await bridge.initializeCrypto()
+                try await matrixBridge.initializeCrypto()
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -285,7 +287,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func getEncryptionStatus(_ call: CAPPluginCall) {
         Task {
             do {
-                let status = try await bridge.getEncryptionStatus()
+                let status = try await matrixBridge.getEncryptionStatus()
                 call.resolve(status)
             } catch {
                 call.reject(error.localizedDescription)
@@ -296,7 +298,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func bootstrapCrossSigning(_ call: CAPPluginCall) {
         Task {
             do {
-                try await bridge.bootstrapCrossSigning()
+                try await matrixBridge.bootstrapCrossSigning()
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -307,7 +309,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func setupKeyBackup(_ call: CAPPluginCall) {
         Task {
             do {
-                let result = try await bridge.setupKeyBackup()
+                let result = try await matrixBridge.setupKeyBackup()
                 call.resolve(result)
             } catch {
                 call.reject(error.localizedDescription)
@@ -318,7 +320,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func getKeyBackupStatus(_ call: CAPPluginCall) {
         Task {
             do {
-                let status = try await bridge.getKeyBackupStatus()
+                let status = try await matrixBridge.getKeyBackupStatus()
                 call.resolve(status)
             } catch {
                 call.reject(error.localizedDescription)
@@ -331,7 +333,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let result = try await bridge.restoreKeyBackup(recoveryKey: recoveryKey)
+                let result = try await matrixBridge.restoreKeyBackup(recoveryKey: recoveryKey)
                 call.resolve(result)
             } catch {
                 call.reject(error.localizedDescription)
@@ -344,7 +346,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let result = try await bridge.setupRecovery(passphrase: passphrase)
+                let result = try await matrixBridge.setupRecovery(passphrase: passphrase)
                 call.resolve(result)
             } catch {
                 call.reject(error.localizedDescription)
@@ -355,7 +357,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func isRecoveryEnabled(_ call: CAPPluginCall) {
         Task {
             do {
-                let enabled = try await bridge.isRecoveryEnabled()
+                let enabled = try await matrixBridge.isRecoveryEnabled()
                 call.resolve(["enabled": enabled])
             } catch {
                 call.reject(error.localizedDescription)
@@ -370,7 +372,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.recoverAndSetup(recoveryKey: recoveryKey)
+                try await matrixBridge.recoverAndSetup(recoveryKey: recoveryKey)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -383,7 +385,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let result = try await bridge.resetRecoveryKey(passphrase: passphrase)
+                let result = try await matrixBridge.resetRecoveryKey(passphrase: passphrase)
                 call.resolve(result)
             } catch {
                 call.reject(error.localizedDescription)
@@ -398,7 +400,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let data = try await bridge.exportRoomKeys(passphrase: passphrase)
+                let data = try await matrixBridge.exportRoomKeys(passphrase: passphrase)
                 call.resolve(["data": data])
             } catch {
                 call.reject(error.localizedDescription)
@@ -414,7 +416,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let count = try await bridge.importRoomKeys(data: data, passphrase: passphrase)
+                let count = try await matrixBridge.importRoomKeys(data: data, passphrase: passphrase)
                 call.resolve(["importedKeys": count])
             } catch {
                 call.reject(error.localizedDescription)
@@ -431,7 +433,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.redactEvent(roomId: roomId, eventId: eventId, reason: reason)
+                try await matrixBridge.redactEvent(roomId: roomId, eventId: eventId, reason: reason)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -448,7 +450,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.sendReaction(roomId: roomId, eventId: eventId, key: key)
+                try await matrixBridge.sendReaction(roomId: roomId, eventId: eventId, key: key)
                 call.resolve(["eventId": ""])
             } catch {
                 call.reject(error.localizedDescription)
@@ -464,7 +466,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let result = try await bridge.searchUsers(searchTerm: searchTerm, limit: limit)
+                let result = try await matrixBridge.searchUsers(searchTerm: searchTerm, limit: limit)
                 call.resolve(result)
             } catch {
                 call.reject(error.localizedDescription)
@@ -480,7 +482,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.setRoomName(roomId: roomId, name: name)
+                try await matrixBridge.setRoomName(roomId: roomId, name: name)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -496,7 +498,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.setRoomTopic(roomId: roomId, topic: topic)
+                try await matrixBridge.setRoomTopic(roomId: roomId, topic: topic)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -512,7 +514,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.inviteUser(roomId: roomId, userId: userId)
+                try await matrixBridge.inviteUser(roomId: roomId, userId: userId)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -529,7 +531,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.kickUser(roomId: roomId, userId: userId, reason: reason)
+                try await matrixBridge.kickUser(roomId: roomId, userId: userId, reason: reason)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -546,7 +548,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.banUser(roomId: roomId, userId: userId, reason: reason)
+                try await matrixBridge.banUser(roomId: roomId, userId: userId, reason: reason)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -562,7 +564,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.unbanUser(roomId: roomId, userId: userId)
+                try await matrixBridge.unbanUser(roomId: roomId, userId: userId)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -578,7 +580,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                try await bridge.sendTyping(roomId: roomId, isTyping: isTyping)
+                try await matrixBridge.sendTyping(roomId: roomId, isTyping: isTyping)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -587,7 +589,15 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func getMediaUrl(_ call: CAPPluginCall) {
-        call.reject("getMediaUrl is only available on web")
+        guard let mxcUrl = call.getString("mxcUrl") else {
+            return call.reject("Missing mxcUrl")
+        }
+        do {
+            let httpUrl = try matrixBridge.getMediaUrl(mxcUrl: mxcUrl)
+            call.resolve(["url": httpUrl])
+        } catch {
+            call.reject(error.localizedDescription)
+        }
     }
 
     @objc func setPresence(_ call: CAPPluginCall) {

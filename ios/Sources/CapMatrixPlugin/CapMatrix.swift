@@ -22,6 +22,10 @@ class MatrixSDKBridge {
     private var client: Client?
     private var syncService: SyncService?
     private let sessionStore = MatrixKeychainStore()
+    private var subscribedRoomIds = Set<String>()
+    private var roomTimelines: [String: Timeline] = [:]
+    // Keep strong references so GC doesn't cancel subscriptions
+    private var timelineListenerHandles: [Any] = []
 
     // MARK: - Auth
 
@@ -29,8 +33,10 @@ class MatrixSDKBridge {
         let dataDir = Self.dataDirectory()
 
         let newClient = try await ClientBuilder()
-            .homeserverUrl(homeserverUrl: homeserverUrl)
-            .sqliteStore(sqliteStoreBuilder: SqliteStoreBuilder(dataPath: dataDir, cachePath: dataDir))
+            .homeserverUrl(url: homeserverUrl)
+            .sessionPaths(dataPath: dataDir, cachePath: dataDir)
+            .slidingSyncVersionBuilder(versionBuilder: .discoverNative)
+            .autoEnableCrossSigning(autoEnableCrossSigning: true)
             .build()
 
         try await newClient.login(
@@ -56,8 +62,10 @@ class MatrixSDKBridge {
         let dataDir = Self.dataDirectory()
 
         let newClient = try await ClientBuilder()
-            .homeserverUrl(homeserverUrl: homeserverUrl)
-            .sqliteStore(sqliteStoreBuilder: SqliteStoreBuilder(dataPath: dataDir, cachePath: dataDir))
+            .homeserverUrl(url: homeserverUrl)
+            .sessionPaths(dataPath: dataDir, cachePath: dataDir)
+            .slidingSyncVersionBuilder(versionBuilder: .discoverNative)
+            .autoEnableCrossSigning(autoEnableCrossSigning: true)
             .build()
 
         let session = Session(
@@ -66,10 +74,11 @@ class MatrixSDKBridge {
             userId: userId,
             deviceId: deviceId,
             homeserverUrl: homeserverUrl,
-            slidingSyncVersion: nil
+            oidcData: nil,
+            slidingSyncVersion: .native
         )
 
-        try newClient.restoreSession(session: session)
+        try await newClient.restoreSession(session: session)
         client = newClient
 
         let info = MatrixSessionInfo(
@@ -83,8 +92,11 @@ class MatrixSDKBridge {
     }
 
     func logout() async throws {
-        syncService?.stop()
+        try await syncService?.stop()
         syncService = nil
+        timelineListenerHandles.removeAll()
+        roomTimelines.removeAll()
+        subscribedRoomIds.removeAll()
         try await client?.logout()
         client = nil
         sessionStore.clear()
@@ -108,46 +120,103 @@ class MatrixSDKBridge {
         let service = try await c.syncService().finish()
         syncService = service
 
-        let observer = SyncStateObserverProxy(onUpdate: { state in
-            onSyncState(Self.mapSyncState(state))
+        let observer = SyncStateObserverProxy(onUpdate: { [weak self] state in
+            let mapped = Self.mapSyncState(state)
+            onSyncState(mapped)
+            // When sync reaches SYNCING, subscribe to room timelines
+            if mapped == "SYNCING" {
+                Task { [weak self] in
+                    await self?.subscribeToRoomTimelines(client: c, onMessage: onMessage, onRoomUpdate: onRoomUpdate)
+                }
+            }
         })
         service.state(listener: observer)
 
-        try await service.start()
+        // Start sync in a detached task so this method can return immediately
+        Task.detached { [weak service] in
+            try? await service?.start()
+        }
+    }
+
+    private func subscribeToRoomTimelines(
+        client c: Client,
+        onMessage: @escaping ([String: Any]) -> Void,
+        onRoomUpdate: @escaping (String, [String: Any]) -> Void
+    ) async {
+        for room in c.rooms() {
+            let roomId = room.id()
+            if subscribedRoomIds.contains(roomId) { continue }
+            subscribedRoomIds.insert(roomId)
+            do {
+                let timeline = try await getOrCreateTimeline(room: room)
+                let listener = LiveTimelineListener(roomId: roomId, onMessage: onMessage, onRoomUpdate: onRoomUpdate)
+                let handle = await timeline.addListener(listener: listener)
+                timelineListenerHandles.append(handle)
+            } catch {
+                print("[CapMatrix] Failed to subscribe to room \(roomId): \(error.localizedDescription)")
+            }
+        }
     }
 
     func stopSync() async throws {
-        syncService?.stop()
+        try await syncService?.stop()
+        subscribedRoomIds.removeAll()
+        timelineListenerHandles.removeAll()
+        roomTimelines.removeAll()
     }
 
     func getSyncState() -> String {
         return "SYNCING"
     }
 
+    // MARK: - Room Lookup
+
+    private func requireRoom(roomId: String) throws -> Room {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        guard let room = c.rooms().first(where: { $0.id() == roomId }) else {
+            throw MatrixBridgeError.roomNotFound(roomId)
+        }
+        return room
+    }
+
+    private func getOrCreateTimeline(room: Room) async throws -> Timeline {
+        let roomId = room.id()
+        if let existing = roomTimelines[roomId] {
+            return existing
+        }
+        let timeline = try await room.timeline()
+        roomTimelines[roomId] = timeline
+        return timeline
+    }
+
     // MARK: - Rooms
 
-    func getRooms() throws -> [[String: Any]] {
+    func getRooms() async throws -> [[String: Any]] {
         guard let c = client else {
             throw MatrixBridgeError.notLoggedIn
         }
-        return c.rooms().map { Self.serializeRoom($0) }
+        var result: [[String: Any]] = []
+        for room in c.rooms() {
+            result.append(try await Self.serializeRoom(room))
+        }
+        return result
     }
 
     func getRoomMembers(roomId: String) async throws -> [[String: Any]] {
-        guard let c = client else {
-            throw MatrixBridgeError.notLoggedIn
+        let room = try requireRoom(roomId: roomId)
+        let iterator = try await room.members()
+        var result: [[String: Any]] = []
+        let total = iterator.len()
+        while let chunk = iterator.nextChunk(chunkSize: min(total, 100)) {
+            for member in chunk {
+                result.append([
+                    "userId": member.userId,
+                    "displayName": member.displayName as Any,
+                    "membership": String(describing: member.membership).lowercased()
+                ])
+            }
         }
-        guard let room = c.getRoom(roomId: roomId) else {
-            throw MatrixBridgeError.roomNotFound(roomId)
-        }
-        let members = try await room.members()
-        return members.map { member in
-            [
-                "userId": member.userId,
-                "displayName": member.displayName as Any,
-                "membership": String(describing: member.membership).lowercased()
-            ]
-        }
+        return result
     }
 
     func joinRoom(roomIdOrAlias: String) async throws -> String {
@@ -159,12 +228,7 @@ class MatrixSDKBridge {
     }
 
     func leaveRoom(roomId: String) async throws {
-        guard let c = client else {
-            throw MatrixBridgeError.notLoggedIn
-        }
-        guard let room = c.getRoom(roomId: roomId) else {
-            throw MatrixBridgeError.roomNotFound(roomId)
-        }
+        let room = try requireRoom(roomId: roomId)
         try await room.leave()
     }
 
@@ -187,36 +251,22 @@ class MatrixSDKBridge {
     // MARK: - Messaging
 
     func sendMessage(roomId: String, body: String, msgtype: String) async throws -> String {
-        guard let c = client else {
-            throw MatrixBridgeError.notLoggedIn
-        }
-        guard let room = c.getRoom(roomId: roomId) else {
-            throw MatrixBridgeError.roomNotFound(roomId)
-        }
-        let timeline = try await room.timeline()
+        let room = try requireRoom(roomId: roomId)
+        let timeline = try await getOrCreateTimeline(room: room)
         let content = messageEventContentFromMarkdown(md: body)
         try await timeline.send(msg: content)
-
-        // The Rust SDK's send() is fire-and-forget; the real eventId arrives via
-        // timeline listener when the server acknowledges. Use the messageReceived
-        // event listener to capture sent message IDs.
         return ""
     }
 
     func getRoomMessages(roomId: String, limit: Int, from: String?) async throws -> [String: Any] {
-        guard let c = client else {
-            throw MatrixBridgeError.notLoggedIn
-        }
-        guard let room = c.getRoom(roomId: roomId) else {
-            throw MatrixBridgeError.roomNotFound(roomId)
-        }
+        let room = try requireRoom(roomId: roomId)
         let timeline = try await room.timeline()
 
         let collector = TimelineItemCollector(roomId: roomId)
         let handle = await timeline.addListener(listener: collector)
 
         try await timeline.paginateBackwards(numEvents: UInt16(limit))
-        try await Task.sleep(nanoseconds: 500_000_000) // Allow listener to process diffs
+        try await Task.sleep(nanoseconds: 500_000_000)
 
         handle.cancel()
 
@@ -228,30 +278,33 @@ class MatrixSDKBridge {
     }
 
     func markRoomAsRead(roomId: String, eventId: String) async throws {
-        guard let c = client else {
-            throw MatrixBridgeError.notLoggedIn
-        }
-        guard let room = c.getRoom(roomId: roomId) else {
-            throw MatrixBridgeError.roomNotFound(roomId)
-        }
-        let timeline = try await room.timeline()
-        try await timeline.markAsRead(receiptType: .read)
+        let room = try requireRoom(roomId: roomId)
+        let timeline = try await getOrCreateTimeline(room: room)
+        try await timeline.markAsRead(receiptType: ReceiptType.read)
     }
 
     // MARK: - Redactions & Reactions
 
     func redactEvent(roomId: String, eventId: String, reason: String?) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
-        let timeline = try await room.timeline()
-        try await timeline.redact(eventOrTransactionId: .eventId(eventId: eventId), reason: reason)
+        let room = try requireRoom(roomId: roomId)
+        try await room.redact(eventId: eventId, reason: reason)
     }
 
     func sendReaction(roomId: String, eventId: String, key: String) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
-        let timeline = try await room.timeline()
-        try await timeline.sendReaction(eventId: eventId, key: key)
+        let room = try requireRoom(roomId: roomId)
+        let timeline = try await getOrCreateTimeline(room: room)
+
+        // toggleReaction needs the timeline item's uniqueId, not the eventId
+        // Collect timeline items to find the one matching our eventId
+        let collector = TimelineItemCollector(roomId: roomId)
+        let handle = await timeline.addListener(listener: collector)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        handle.cancel()
+
+        guard let uniqueId = collector.uniqueIdForEvent(eventId) else {
+            throw MatrixBridgeError.notSupported("Could not find timeline item for event \(eventId)")
+        }
+        try await timeline.toggleReaction(uniqueId: uniqueId, key: key)
     }
 
     // MARK: - User Discovery
@@ -275,53 +328,58 @@ class MatrixSDKBridge {
     // MARK: - Room Management
 
     func setRoomName(roomId: String, name: String) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let room = try requireRoom(roomId: roomId)
         try await room.setName(name: name)
     }
 
     func setRoomTopic(roomId: String, topic: String) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let room = try requireRoom(roomId: roomId)
         try await room.setTopic(topic: topic)
     }
 
     func inviteUser(roomId: String, userId: String) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let room = try requireRoom(roomId: roomId)
         try await room.inviteUserById(userId: userId)
     }
 
     func kickUser(roomId: String, userId: String, reason: String?) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let room = try requireRoom(roomId: roomId)
         try await room.kickUser(userId: userId, reason: reason)
     }
 
     func banUser(roomId: String, userId: String, reason: String?) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let room = try requireRoom(roomId: roomId)
         try await room.banUser(userId: userId, reason: reason)
     }
 
     func unbanUser(roomId: String, userId: String) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let room = try requireRoom(roomId: roomId)
         try await room.unbanUser(userId: userId, reason: nil)
+    }
+
+    // MARK: - Media URL
+
+    func getMediaUrl(mxcUrl: String) throws -> String {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let mxcPath = mxcUrl.replacingOccurrences(of: "mxc://", with: "")
+        return "\(baseUrl)/_matrix/client/v1/media/download/\(mxcPath)?access_token=\(session.accessToken)"
     }
 
     // MARK: - Typing
 
     func sendTyping(roomId: String, isTyping: Bool) async throws {
-        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        guard let room = c.getRoom(roomId: roomId) else { throw MatrixBridgeError.roomNotFound(roomId) }
+        let room = try requireRoom(roomId: roomId)
         try await room.typingNotice(isTyping: isTyping)
     }
 
     // MARK: - Encryption
 
     func initializeCrypto() async throws {
-        // No-op on native — Rust SDK handles crypto automatically
         guard client != nil else { throw MatrixBridgeError.notLoggedIn }
     }
 
@@ -349,9 +407,6 @@ class MatrixSDKBridge {
     }
 
     func bootstrapCrossSigning() async throws {
-        // bootstrapCrossSigning is not available in matrix-rust-components-swift 26.01.04.
-        // Cross-signing is bootstrapped automatically by the SDK when autoEnableCrossSigning
-        // is set on the ClientBuilder. This method is intentionally a no-op here.
         guard client != nil else { throw MatrixBridgeError.notLoggedIn }
     }
 
@@ -381,7 +436,6 @@ class MatrixSDKBridge {
         let listener = NoopEnableRecoveryProgressListener()
         let key = try await c.encryption().enableRecovery(
             waitForBackupsToUpload: false,
-            passphrase: passphrase,
             progressListener: listener
         )
         return ["recoveryKey": key]
@@ -404,12 +458,10 @@ class MatrixSDKBridge {
     }
 
     func exportRoomKeys(passphrase: String) async throws -> String {
-        // exportRoomKeys is not available in matrix-rust-components-swift 26.01.04.
         throw MatrixBridgeError.notSupported("exportRoomKeys")
     }
 
     func importRoomKeys(data: String, passphrase: String) async throws -> Int {
-        // importRoomKeys is not available in matrix-rust-components-swift 26.01.04.
         throw MatrixBridgeError.notSupported("importRoomKeys")
     }
 
@@ -422,16 +474,26 @@ class MatrixSDKBridge {
         return dir.path
     }
 
-    private static func serializeRoom(_ room: Room) -> [String: Any] {
-        let info = room.roomInfo()
+    private static func serializeRoom(_ room: Room) async throws -> [String: Any] {
+        let info = try await room.roomInfo()
+        let encrypted = (try? room.isEncrypted()) ?? false
+        let membership: String = {
+            switch room.membership() {
+            case .joined: return "join"
+            case .invited: return "invite"
+            case .left: return "leave"
+            @unknown default: return "join"
+            }
+        }()
         return [
             "roomId": room.id(),
             "name": info.displayName ?? "",
             "topic": info.topic as Any,
             "memberCount": info.joinedMembersCount ?? 0,
-            "isEncrypted": info.isEncrypted,
+            "isEncrypted": encrypted,
             "unreadCount": info.numUnreadMessages ?? 0,
-            "lastEventTs": nil as Int? as Any
+            "lastEventTs": nil as Int? as Any,
+            "membership": membership,
         ]
     }
 
@@ -445,17 +507,211 @@ class MatrixSDKBridge {
             return "STOPPED"
         case .error:
             return "ERROR"
-        case .offline:
+        @unknown default:
             return "ERROR"
         }
     }
 }
 
-// MARK: - Timeline Item Collector
+// MARK: - Timeline Serialization Helpers
+
+private func extractMediaUrl(source: MediaSource, into contentDict: inout [String: Any]) {
+    let url = source.url()
+    if !url.isEmpty {
+        contentDict["url"] = url
+    }
+    // Fallback: for encrypted media, try toJson to extract the mxc URL
+    if contentDict["url"] == nil || (contentDict["url"] as? String)?.isEmpty == true {
+        let json = source.toJson()
+        if let jsonData = json.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+           let mxcUrl = parsed["url"] as? String, !mxcUrl.isEmpty {
+            contentDict["url"] = mxcUrl
+        }
+    }
+}
+
+private func serializeTimelineItem(_ item: TimelineItem, roomId: String) -> [String: Any]? {
+    guard let eventItem = item.asEvent() else { return nil }
+
+    let eventId: String
+    if let eid = eventItem.eventId() {
+        eventId = eid
+    } else if let tid = eventItem.transactionId() {
+        eventId = tid
+    } else {
+        return nil
+    }
+
+    var contentDict: [String: Any] = [:]
+    var eventType = "m.room.message"
+
+    let content = eventItem.content()
+    switch content.kind() {
+    case .message:
+        if let msg = content.asMessage() {
+            contentDict["body"] = msg.body()
+            switch msg.msgtype() {
+            case .text:
+                contentDict["msgtype"] = "m.text"
+            case .image(let imgContent):
+                contentDict["msgtype"] = "m.image"
+                extractMediaUrl(source: imgContent.source, into: &contentDict)
+            case .file(let fileContent):
+                contentDict["msgtype"] = "m.file"
+                contentDict["filename"] = fileContent.filename
+                extractMediaUrl(source: fileContent.source, into: &contentDict)
+            case .audio(let audioContent):
+                contentDict["msgtype"] = "m.audio"
+                contentDict["filename"] = audioContent.filename
+                extractMediaUrl(source: audioContent.source, into: &contentDict)
+            case .video(let videoContent):
+                contentDict["msgtype"] = "m.video"
+                contentDict["filename"] = videoContent.filename
+                extractMediaUrl(source: videoContent.source, into: &contentDict)
+            case .emote:
+                contentDict["msgtype"] = "m.emote"
+            case .notice:
+                contentDict["msgtype"] = "m.notice"
+            default:
+                contentDict["msgtype"] = "m.text"
+            }
+        }
+    case .unableToDecrypt:
+        contentDict["body"] = "Unable to decrypt message"
+        contentDict["msgtype"] = "m.text"
+        contentDict["encrypted"] = true
+    case .redactedMessage:
+        eventType = "m.room.redaction"
+        contentDict["body"] = "Message deleted"
+    default:
+        eventType = "m.room.unknown"
+    }
+
+    // Reactions
+    let reactions = eventItem.reactions()
+    if !reactions.isEmpty {
+        contentDict["reactions"] = reactions.map { r in
+            [
+                "key": r.key,
+                "count": r.senders.count,
+                "senders": r.senders.map { $0.senderId },
+            ] as [String: Any]
+        }
+    }
+
+    // Delivery/read status
+    var status: String = "sent"
+    if let sendState = eventItem.localSendState() {
+        switch sendState {
+        case .notSentYet:
+            status = "sending"
+        case .sendingFailed(_, _):
+            status = "sending"
+        case .sent(_):
+            // Check read receipts below
+            break
+        default:
+            break
+        }
+    }
+
+    var readBy: [String]? = nil
+    if status == "sent" {
+        let receipts = eventItem.readReceipts()
+        let others = receipts.keys.filter { $0 != eventItem.sender() }
+        if !others.isEmpty {
+            status = "read"
+            readBy = Array(others)
+        }
+    }
+
+    return [
+        "eventId": eventId,
+        "roomId": roomId,
+        "senderId": eventItem.sender(),
+        "type": eventType,
+        "content": contentDict,
+        "originServerTs": eventItem.timestamp(),
+        "status": status,
+        "readBy": readBy as Any,
+    ]
+}
+
+// MARK: - Live Timeline Listener (for sync subscriptions)
+
+class LiveTimelineListener: TimelineListener {
+    private let roomId: String
+    private let onMessage: ([String: Any]) -> Void
+    private let onRoomUpdate: (String, [String: Any]) -> Void
+
+    init(roomId: String, onMessage: @escaping ([String: Any]) -> Void, onRoomUpdate: @escaping (String, [String: Any]) -> Void) {
+        self.roomId = roomId
+        self.onMessage = onMessage
+        self.onRoomUpdate = onRoomUpdate
+    }
+
+    func onUpdate(diff: [TimelineDiff]) {
+        for d in diff {
+            switch d.change() {
+            case .reset:
+                d.reset()?.forEach { item in
+                    if let event = serializeTimelineItem(item, roomId: roomId) {
+                        onMessage(event)
+                    }
+                }
+                onRoomUpdate(roomId, ["roomId": roomId])
+            case .append:
+                d.append()?.forEach { item in
+                    if let event = serializeTimelineItem(item, roomId: roomId) {
+                        onMessage(event)
+                    }
+                }
+                onRoomUpdate(roomId, ["roomId": roomId])
+            case .pushBack:
+                if let item = d.pushBack() {
+                    // Skip local echoes — the Set diff will follow with the real EventId
+                    let isLocalEcho = item.asEvent()?.eventId() == nil && item.asEvent()?.transactionId() != nil
+                    if !isLocalEcho, let event = serializeTimelineItem(item, roomId: roomId) {
+                        onMessage(event)
+                    }
+                    onRoomUpdate(roomId, ["roomId": roomId])
+                }
+            case .pushFront:
+                if let item = d.pushFront() {
+                    if let event = serializeTimelineItem(item, roomId: roomId) {
+                        onMessage(event)
+                    }
+                    onRoomUpdate(roomId, ["roomId": roomId])
+                }
+            case .set:
+                if let data = d.set() {
+                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
+                        onMessage(event)
+                    }
+                }
+            case .insert:
+                if let data = d.insert() {
+                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
+                        onMessage(event)
+                    }
+                    onRoomUpdate(roomId, ["roomId": roomId])
+                }
+            case .remove:
+                break // Index-based removal, handled by JS layer
+            default:
+                break
+            }
+        }
+    }
+}
+
+// MARK: - Timeline Item Collector (for pagination/one-shot reads)
 
 class TimelineItemCollector: TimelineListener {
     private let lock = NSLock()
     private var _events: [[String: Any]] = []
+    private var _uniqueIdMap: [String: String] = [:] // eventId -> uniqueId
     private let roomId: String
 
     init(roomId: String) {
@@ -468,6 +724,12 @@ class TimelineItemCollector: TimelineListener {
         return _events
     }
 
+    func uniqueIdForEvent(_ eventId: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _uniqueIdMap[eventId]
+    }
+
     func onUpdate(diff: [TimelineDiff]) {
         lock.lock()
         defer { lock.unlock() }
@@ -475,26 +737,47 @@ class TimelineItemCollector: TimelineListener {
             switch d.change() {
             case .reset:
                 _events.removeAll()
+                _uniqueIdMap.removeAll()
                 d.reset()?.forEach { item in
-                    if let event = Self.serializeTimelineItem(item, roomId: roomId) {
+                    trackUniqueId(item)
+                    if let event = serializeTimelineItem(item, roomId: roomId) {
                         _events.append(event)
                     }
                 }
             case .append:
                 d.append()?.forEach { item in
-                    if let event = Self.serializeTimelineItem(item, roomId: roomId) {
+                    trackUniqueId(item)
+                    if let event = serializeTimelineItem(item, roomId: roomId) {
                         _events.append(event)
                     }
                 }
             case .pushBack:
-                if let item = d.pushBack(),
-                   let event = Self.serializeTimelineItem(item, roomId: roomId) {
-                    _events.append(event)
+                if let item = d.pushBack() {
+                    trackUniqueId(item)
+                    if let event = serializeTimelineItem(item, roomId: roomId) {
+                        _events.append(event)
+                    }
                 }
             case .pushFront:
-                if let item = d.pushFront(),
-                   let event = Self.serializeTimelineItem(item, roomId: roomId) {
-                    _events.insert(event, at: 0)
+                if let item = d.pushFront() {
+                    trackUniqueId(item)
+                    if let event = serializeTimelineItem(item, roomId: roomId) {
+                        _events.insert(event, at: 0)
+                    }
+                }
+            case .set:
+                if let data = d.set() {
+                    trackUniqueId(data.item)
+                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
+                        _events.append(event)
+                    }
+                }
+            case .insert:
+                if let data = d.insert() {
+                    trackUniqueId(data.item)
+                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
+                        _events.append(event)
+                    }
                 }
             default:
                 break
@@ -502,35 +785,15 @@ class TimelineItemCollector: TimelineListener {
         }
     }
 
-    static func serializeTimelineItem(_ item: TimelineItem, roomId: String) -> [String: Any]? {
-        guard let eventItem = item.asEvent() else { return nil }
-
-        let eventId: String
-        switch eventItem.eventOrTransactionId() {
-        case .eventId(let id):
-            eventId = id
-        case .transactionId(let id):
-            eventId = id
+    private func trackUniqueId(_ item: TimelineItem) {
+        guard let eventItem = item.asEvent() else { return }
+        let uniqueId = item.uniqueId()
+        if let eid = eventItem.eventId() {
+            _uniqueIdMap[eid] = uniqueId
         }
-
-        var contentDict: [String: Any] = [:]
-        var eventType = "m.room.message"
-
-        if case .msgLike(let msgContent) = eventItem.content() {
-            if case .message(let messageContent) = msgContent.kind {
-                contentDict["body"] = messageContent.body
-                contentDict["msgtype"] = "m.text"
-            }
+        if let tid = eventItem.transactionId() {
+            _uniqueIdMap[tid] = uniqueId
         }
-
-        return [
-            "eventId": eventId,
-            "roomId": roomId,
-            "senderId": eventItem.sender(),
-            "type": eventType,
-            "content": contentDict,
-            "originServerTs": eventItem.timestamp()
-        ]
     }
 }
 
@@ -571,7 +834,7 @@ class SyncStateObserverProxy: SyncServiceStateObserver {
 
 class NoopEnableRecoveryProgressListener: EnableRecoveryProgressListener {
     func onUpdate(status: EnableRecoveryProgress) {
-        // No-op — progress updates are not surfaced through the Capacitor bridge
+        // No-op
     }
 }
 
