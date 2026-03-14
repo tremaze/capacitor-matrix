@@ -487,7 +487,11 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async getMediaUrl(options: { mxcUrl: string }): Promise<{ httpUrl: string }> {
     this.requireClient();
-    const httpUrl = this.client!.mxcUrlToHttp(options.mxcUrl) ?? '';
+    // Use the authenticated media endpoint (Matrix v1.11+)
+    const mxcPath = options.mxcUrl.replace('mxc://', '');
+    const baseUrl = this.client!.getHomeserverUrl().replace(/\/$/, '');
+    const accessToken = this.client!.getAccessToken();
+    const httpUrl = `${baseUrl}/_matrix/client/v1/media/download/${mxcPath}?access_token=${accessToken}`;
     return { httpUrl };
   }
 

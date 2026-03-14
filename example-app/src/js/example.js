@@ -1185,19 +1185,21 @@ function renderMessage(evt, insertBefore = null) {
 
   // Media rendering
   if (msgtype === 'm.image' && evt.content?.url) {
-    bubbleHtml += `<div class="media-preview"><img src="" data-mxc="${esc(evt.content.url)}" alt="${esc(body)}" onclick="window.open(this.src)" /></div>`;
-    if (body) bubbleHtml += `<div style="font-size:12px;opacity:0.7;margin-top:4px">${esc(body)}</div>`;
+    const info = evt.content?.info;
+    const aspectStyle = mediaAspectStyle(info, 280);
+    bubbleHtml += `<div class="media-preview" ${aspectStyle ? `style="${aspectStyle}"` : ''}><img src="" data-mxc="${esc(evt.content.url)}" alt="${esc(body)}" onclick="window.open(this.src)" style="width:100%;height:100%;object-fit:cover;border-radius:12px;cursor:pointer" /></div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.audio' && evt.content?.url) {
-    bubbleHtml += `<div class="media-preview"><audio controls src="" data-mxc="${esc(evt.content.url)}"></audio></div>`;
+    bubbleHtml += `<div class="media-preview"><audio controls src="" data-mxc="${esc(evt.content.url)}" style="width:100%"></audio></div>`;
     if (body) bubbleHtml += `<div style="font-size:12px;opacity:0.7;margin-top:4px">${esc(body)}</div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.video' && evt.content?.url) {
-    bubbleHtml += `<div class="media-preview"><video controls src="" data-mxc="${esc(evt.content.url)}" style="max-width:280px"></video></div>`;
-    if (body) bubbleHtml += `<div style="font-size:12px;opacity:0.7;margin-top:4px">${esc(body)}</div>`;
+    const info = evt.content?.info;
+    const aspectStyle = mediaAspectStyle(info, 280);
+    bubbleHtml += `<div class="media-preview" ${aspectStyle ? `style="${aspectStyle}"` : ''}><video controls src="" data-mxc="${esc(evt.content.url)}" style="width:100%;height:100%;border-radius:12px"></video></div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.file' && evt.content?.url) {
-    bubbleHtml += `<div class="media-preview"><a href="#" data-mxc="${esc(evt.content.url)}" onclick="downloadMedia(this,event)">&#128206; ${esc(body || 'Download file')}</a></div>`;
+    bubbleHtml += `<div class="media-preview"><a href="#" data-mxc="${esc(evt.content.url)}" onclick="downloadMedia(this,event)" style="display:flex;align-items:center;gap:8px;text-decoration:none;color:inherit">&#128206; <span>${esc(body || 'Download file')}</span></a></div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.emote') {
     bubbleHtml += `<em>* ${esc(evt.senderId)} ${esc(body)}</em>`;
@@ -1308,6 +1310,17 @@ function updateMsgStatus(eventId, status) {
       statusEl.style.letterSpacing = '-3px';
     }
   }
+}
+
+function mediaAspectStyle(info, maxWidth) {
+  if (!info) return '';
+  const w = info.w || info.width;
+  const h = info.h || info.height;
+  if (!w || !h) return '';
+  const aspect = w / h;
+  const displayWidth = Math.min(w, maxWidth);
+  const displayHeight = Math.round(displayWidth / aspect);
+  return `width:${displayWidth}px;height:${displayHeight}px`;
 }
 
 function addReactionChip(eventId, key, isMine = false) {
@@ -1544,14 +1557,32 @@ window.doSendFile = async () => {
     URL.revokeObjectURL(fileUri);
     log(`File sent: ${result.eventId}`, 'success');
 
-    renderMessage({
-      eventId: result.eventId,
-      roomId: selectedRoomId,
-      senderId: currentUserId,
-      type: 'm.room.message',
-      content: { body: file.name, msgtype },
-      originServerTs: Date.now(),
-    });
+    // Upgrade the SDK's local echo element (with ~! prefix) to the real server event ID
+    if (result.eventId) {
+      const localEchoEl = document.querySelector('[data-event-id^="~!"]');
+      if (localEchoEl) {
+        const oldId = localEchoEl.dataset.eventId;
+        localEchoEl.dataset.eventId = result.eventId;
+        const wrap = localEchoEl.querySelector('.msg-content-wrap');
+        if (wrap) {
+          const actionsBar = wrap.querySelector('.msg-actions-bar');
+          if (actionsBar) {
+            actionsBar.innerHTML = `
+              <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F44D}')">&#128077;</button>
+              <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u2764\\uFE0F')">&#10084;&#65039;</button>
+              <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F602}')">&#128514;</button>
+              <button class="msg-action-btn" onclick="doRedact('${result.eventId}')" title="Delete" style="color:var(--red)">&#10005;</button>
+            `;
+          }
+          const reactionsBar = wrap.querySelector('.msg-reactions-bar');
+          if (reactionsBar) {
+            reactionsBar.id = `reactions-${result.eventId}`;
+          }
+        }
+        log(`Upgraded ${oldId} -> ${result.eventId}`, 'success');
+      }
+      updateMsgStatus(result.eventId, 'sent');
+    }
     const msgList = document.getElementById('messageList');
     msgList.scrollTop = msgList.scrollHeight;
   } catch (e) {

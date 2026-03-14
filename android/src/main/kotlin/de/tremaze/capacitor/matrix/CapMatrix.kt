@@ -16,6 +16,7 @@ import org.matrix.rustcomponents.sdk.EnableRecoveryProgress
 import org.matrix.rustcomponents.sdk.EnableRecoveryProgressListener
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.MembershipState
+import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.RecoveryException
@@ -407,6 +408,14 @@ class MatrixSDKBridge(private val context: Context) {
         timeline.redactEvent(EventOrTransactionId.EventId(eventId), reason)
     }
 
+    fun getMediaUrl(mxcUrl: String): String {
+        // Convert mxc://server/media_id to authenticated download URL
+        val session = sessionStore.load() ?: throw IllegalStateException("Not logged in")
+        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val mxcPath = mxcUrl.removePrefix("mxc://")
+        return "$baseUrl/_matrix/client/v1/media/download/$mxcPath?access_token=${session.accessToken}"
+    }
+
     suspend fun sendReaction(roomId: String, eventId: String, key: String) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
@@ -676,7 +685,40 @@ class MatrixSDKBridge(private val context: Context) {
                     when (kind) {
                         is MsgLikeKind.Message -> {
                             contentMap["body"] = kind.content.body
-                            contentMap["msgtype"] = "m.text"
+                            when (val msgType = kind.content.msgType) {
+                                is MessageType.Text -> {
+                                    contentMap["msgtype"] = "m.text"
+                                }
+                                is MessageType.Image -> {
+                                    contentMap["msgtype"] = "m.image"
+                                    contentMap["filename"] = msgType.content.filename
+                                    extractMediaUrl(msgType.content.source, contentMap)
+                                }
+                                is MessageType.File -> {
+                                    contentMap["msgtype"] = "m.file"
+                                    contentMap["filename"] = msgType.content.filename
+                                    extractMediaUrl(msgType.content.source, contentMap)
+                                }
+                                is MessageType.Audio -> {
+                                    contentMap["msgtype"] = "m.audio"
+                                    contentMap["filename"] = msgType.content.filename
+                                    extractMediaUrl(msgType.content.source, contentMap)
+                                }
+                                is MessageType.Video -> {
+                                    contentMap["msgtype"] = "m.video"
+                                    contentMap["filename"] = msgType.content.filename
+                                    extractMediaUrl(msgType.content.source, contentMap)
+                                }
+                                is MessageType.Emote -> {
+                                    contentMap["msgtype"] = "m.emote"
+                                }
+                                is MessageType.Notice -> {
+                                    contentMap["msgtype"] = "m.notice"
+                                }
+                                else -> {
+                                    contentMap["msgtype"] = "m.text"
+                                }
+                            }
                         }
                         is MsgLikeKind.UnableToDecrypt -> {
                             contentMap["body"] = "Unable to decrypt message"
@@ -758,6 +800,31 @@ class MatrixSDKBridge(private val context: Context) {
             SyncServiceState.TERMINATED -> "STOPPED"
             SyncServiceState.ERROR -> "ERROR"
             SyncServiceState.OFFLINE -> "ERROR"
+        }
+    }
+
+    private fun extractMediaUrl(source: org.matrix.rustcomponents.sdk.MediaSource, contentMap: MutableMap<String, Any?>) {
+        try {
+            val url = source.url()
+            android.util.Log.d("CapMatrix", "  source.url() = $url")
+            contentMap["url"] = url
+        } catch (e: Exception) {
+            android.util.Log.d("CapMatrix", "  source.url() failed: ${e.message}")
+        }
+        // Always try toJson as well — for encrypted media the url() may be empty or fail
+        if (contentMap["url"] == null || (contentMap["url"] as? String).isNullOrEmpty()) {
+            try {
+                val json = source.toJson()
+                android.util.Log.d("CapMatrix", "  source.toJson(): $json")
+                val parsed = org.json.JSONObject(json)
+                // Encrypted media has the URL nested in the JSON
+                val url = parsed.optString("url", "")
+                if (url.isNotEmpty()) {
+                    contentMap["url"] = url
+                }
+            } catch (e2: Exception) {
+                android.util.Log.d("CapMatrix", "  source.toJson() failed: ${e2.message}")
+            }
         }
     }
 

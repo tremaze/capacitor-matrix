@@ -433,7 +433,15 @@ class MatrixPlugin : Plugin() {
 
     @PluginMethod
     fun getMediaUrl(call: PluginCall) {
-        call.reject("getMediaUrl is only available on web")
+        val mxcUrl = call.getString("mxcUrl") ?: return call.reject("mxcUrl required")
+        try {
+            val httpUrl = bridge.getMediaUrl(mxcUrl)
+            val ret = JSObject()
+            ret.put("httpUrl", httpUrl)
+            call.resolve(ret)
+        } catch (e: Exception) {
+            call.reject(e.message ?: "Failed to resolve media URL")
+        }
     }
 
     @PluginMethod

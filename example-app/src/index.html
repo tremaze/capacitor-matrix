@@ -652,16 +652,23 @@
         padding: 4px 0;
       }
 
-      .media-preview img {
-        max-width: min(240px, 65vw);
-        max-height: 240px;
-        border-radius: var(--radius-md);
-        cursor: pointer;
-        display: block;
-      }
-      .media-preview audio, .media-preview video {
+      .media-preview {
         max-width: min(280px, 70vw);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+      }
+      .media-preview img {
+        max-width: 100%;
+        display: block;
+        cursor: pointer;
+      }
+      .media-preview audio {
+        width: 100%;
         border-radius: var(--radius-sm);
+      }
+      .media-preview video {
+        max-width: 100%;
+        display: block;
       }
       .media-preview a {
         color: var(--accent);
