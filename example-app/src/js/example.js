@@ -4,17 +4,31 @@ import { Matrix } from '@tremaze/capacitor-matrix';
 
 let selectedRoomId = null;
 let currentUserId = null;
+let currentRooms = [];
+let _refreshRoomTimer = null;
+
+function refreshRoomListDebounced() {
+  if (_refreshRoomTimer) clearTimeout(_refreshRoomTimer);
+  _refreshRoomTimer = setTimeout(() => {
+    _refreshRoomTimer = null;
+    window.doGetRooms();
+  }, 500);
+}
 
 // ── Logging ────────────────────────────────────────────
 
-const logEl = document.getElementById('log');
+const logDesktop = document.getElementById('debugLog');
+const logMobile = document.getElementById('debugLogMobile');
 
 function log(msg, cls = '') {
   const line = document.createElement('div');
   if (cls) line.className = cls;
   line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-  logEl.appendChild(line);
-  logEl.scrollTop = logEl.scrollHeight;
+  // Write to both desktop and mobile log
+  logDesktop.appendChild(line.cloneNode(true));
+  logMobile.appendChild(line);
+  logDesktop.scrollTop = logDesktop.scrollHeight;
+  logMobile.scrollTop = logMobile.scrollHeight;
 }
 
 function logResult(label, data) {
@@ -26,17 +40,17 @@ function logError(label, err) {
 }
 
 window.clearLog = () => {
-  logEl.innerHTML = '';
+  logDesktop.innerHTML = '';
+  logMobile.innerHTML = '';
 };
 
 window.copyLog = async () => {
-  const text = logEl.innerText;
+  const text = logDesktop.innerText;
   if (!text) return log('Nothing to copy', 'error');
   try {
     await navigator.clipboard.writeText(text);
     log('Log copied to clipboard', 'success');
   } catch {
-    // Fallback for environments without clipboard API
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -53,8 +67,8 @@ window.copyLog = async () => {
 
 if ('visualViewport' in window) {
   window.visualViewport.addEventListener('resize', () => {
-    const composeBar = document.getElementById('composeBar');
-    if (composeBar && document.activeElement?.closest('#composeBar')) {
+    const composeBar = document.querySelector('.compose-bar');
+    if (composeBar && document.activeElement?.closest('.compose-bar')) {
       requestAnimationFrame(() => {
         composeBar.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       });
@@ -64,10 +78,12 @@ if ('visualViewport' in window) {
 
 // ── Status ─────────────────────────────────────────────
 
+let statusText = 'Not connected';
+
 function setStatus(text, state) {
-  document.getElementById('statusText').textContent = text;
+  statusText = text;
   const dot = document.getElementById('statusDot');
-  dot.className = 'status-dot';
+  dot.className = 'status-indicator';
   if (state) dot.classList.add(state);
 }
 
@@ -79,7 +95,28 @@ window.toggleAuthMode = () => {
   tokenMode = !tokenMode;
   document.getElementById('passwordAuth').classList.toggle('hidden', tokenMode);
   document.getElementById('tokenAuth').classList.toggle('hidden', !tokenMode);
+  document.getElementById('authToggleBtn').textContent = tokenMode
+    ? 'Use password instead'
+    : 'Use access token instead';
 };
+
+function showApp() {
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('appShell').classList.add('active');
+  // Update user display
+  const initials = currentUserId ? currentUserId.replace('@', '').substring(0, 2).toUpperCase() : '??';
+  document.getElementById('userAvatar').textContent = initials;
+  document.getElementById('userName').textContent = currentUserId || 'Unknown';
+  // Hide mobile debug button on desktop, desktop on mobile
+  updateDebugBtnVisibility();
+}
+
+function updateDebugBtnVisibility() {
+  const isMobile = window.innerWidth <= 768;
+  document.getElementById('debugMobileBtn').style.display = isMobile ? '' : 'none';
+  document.getElementById('debugDesktopBtn').style.display = isMobile ? 'none' : '';
+}
+window.addEventListener('resize', updateDebugBtnVisibility);
 
 window.doLogin = async () => {
   const homeserverUrl = document.getElementById('homeserverUrl').value.trim();
@@ -96,6 +133,7 @@ window.doLogin = async () => {
     currentUserId = session.userId;
     logResult('Login success', session);
     setStatus(`Logged in as ${session.userId}`, 'connected');
+    showApp();
     await startSyncAndLoadRooms();
   } catch (e) {
     logError('Login', e);
@@ -123,6 +161,7 @@ window.doLoginWithToken = async () => {
     currentUserId = session.userId;
     logResult('Token login success', session);
     setStatus(`Logged in as ${session.userId}`, 'connected');
+    showApp();
     await startSyncAndLoadRooms();
   } catch (e) {
     logError('Token login', e);
@@ -137,8 +176,11 @@ window.doLogout = async () => {
     setStatus('Not connected');
     selectedRoomId = null;
     currentUserId = null;
+    currentRooms = [];
     document.getElementById('roomList').innerHTML = '';
-    document.getElementById('roomDetail').classList.add('hidden');
+    document.getElementById('loginScreen').classList.remove('hidden');
+    document.getElementById('appShell').classList.remove('active');
+    closeSettingsDrawer();
   } catch (e) {
     logError('Logout', e);
   }
@@ -153,9 +195,12 @@ window.doClearAllData = async () => {
     setStatus('Not connected');
     selectedRoomId = null;
     currentUserId = null;
+    currentRooms = [];
     document.getElementById('roomList').innerHTML = '';
-    document.getElementById('roomDetail').classList.add('hidden');
+    document.getElementById('loginScreen').classList.remove('hidden');
+    document.getElementById('appShell').classList.remove('active');
     localStorage.clear();
+    closeSettingsDrawer();
   } catch (e) {
     logError('clearAllData', e);
   }
@@ -222,18 +267,18 @@ function registerListeners() {
     switch (data.state) {
       case 'SYNCING':
         setStatus('Syncing', 'syncing');
+        // Always refresh room list on sync to pick up new rooms/changes
+        refreshRoomListDebounced();
         if (!roomsLoaded) {
           roomsLoaded = true;
-          await window.doGetRooms();
         }
-        // Check crypto status after first sync completes
         if (!cryptoChecked) {
           cryptoChecked = true;
           setTimeout(() => checkAndPromptCrypto(), 500);
         }
         break;
       case 'ERROR':
-        setStatus(`Sync error: ${data.error || 'unknown'}`, 'error');
+        setStatus(`Sync error`, 'error');
         log(`Sync error: ${data.error || 'unknown'}`, 'error');
         break;
       case 'STOPPED':
@@ -246,37 +291,61 @@ function registerListeners() {
     const evt = data.event;
     log(`Event ${evt?.type} from ${evt?.senderId}: ${JSON.stringify(evt?.content)}`, 'event');
     if (evt && evt.roomId === selectedRoomId) {
-      // Handle redactions
       if (evt.type === 'm.room.redaction') {
         const redactedId = evt.content?.redacts || evt.redacts;
         if (redactedId) {
           const el = document.querySelector(`[data-event-id="${redactedId}"]`);
           if (el) {
-            el.innerHTML = '<em style="color:#999">Message deleted</em>';
+            el.innerHTML = '<em style="color:var(--text-muted)">Message deleted</em>';
             el.className = 'msg-system';
           }
         }
         return;
       }
-      // Handle reactions
       if (evt.type === 'm.reaction') {
         const rel = evt.content?.['m.relates_to'];
+        log(`Reaction rel: ${JSON.stringify(rel)}`, 'event');
+        // Skip own reactions — already added optimistically by doReact
+        if (evt.senderId === currentUserId) return;
         if (rel?.event_id && rel?.key) {
           addReactionChip(rel.event_id, rel.key);
         }
         return;
       }
-      // Normal messages from others
-      if (evt.senderId !== currentUserId) {
-        renderMessage(evt);
-        const msgList = document.getElementById('messageList');
-        msgList.scrollTop = msgList.scrollHeight;
+      // If event already exists, update reactions (Android sends Set diffs for reaction changes)
+      if (evt.eventId && document.querySelector(`[data-event-id="${evt.eventId}"]`)) {
+        const aggReactions = evt.content?.reactions;
+        if (Array.isArray(aggReactions)) {
+          const container = document.getElementById(`reactions-${evt.eventId}`);
+          if (container) {
+            container.innerHTML = '';
+            for (const r of aggReactions) {
+              for (let i = 0; i < (r.count || 1); i++) {
+                addReactionChip(evt.eventId, r.key);
+              }
+            }
+          }
+        }
+        return;
       }
+      // For own messages, skip the SDK's local echo (it has a temp ID that
+      // won't work for reactions). The optimistic placeholder stays until
+      // doSendMessage resolves with the real server eventId.
+      if (evt.senderId === currentUserId) {
+        const hasLocalPlaceholder = document.querySelector('[data-event-id^="local-"]');
+        if (hasLocalPlaceholder) return;
+      }
+      renderMessage(evt);
+      const msgList = document.getElementById('messageList');
+      msgList.scrollTop = msgList.scrollHeight;
     }
+    // Refresh room list to update previews/unread counts
+    refreshRoomListDebounced();
   });
 
   Matrix.addListener('roomUpdated', (data) => {
     log(`Room updated: ${data.roomId}`, 'event');
+    refreshRoomListDebounced();
   });
 
   Matrix.addListener('typingChanged', (data) => {
@@ -293,7 +362,6 @@ async function startSyncAndLoadRooms() {
   cryptoChecked = false;
   registerListeners();
 
-  // Initialize crypto before starting sync
   try {
     await Matrix.initializeCrypto();
     log('Crypto initialized', 'success');
@@ -331,18 +399,13 @@ async function checkAndPromptCrypto() {
     log(`Crypto check: secretStorage=${status.isSecretStorageReady}, crossSigning=${status.isCrossSigningReady}, keyBackup=${status.isKeyBackupEnabled}`, 'event');
 
     if (!status.isSecretStorageReady) {
-      // Check if a backup already exists on the server
       const backupStatus = await Matrix.getKeyBackupStatus().catch(() => ({ exists: false }));
       if (backupStatus.exists) {
-        // Backup exists server-side but this device isn't set up — need to recover
         showRecoverModal();
       } else {
-        // No backup at all — prompt to create one
         showSetupRecoveryModal();
       }
     } else if (!status.isKeyBackupEnabled) {
-      // Secret storage exists but key backup isn't enabled on this device —
-      // need recovery key/passphrase to unlock
       showRecoverModal();
     } else {
       log('Encryption set up for this device', 'success');
@@ -359,11 +422,11 @@ function showSetupRecoveryModal() {
     <div class="step">
       <label><span class="step-num">1</span> Passphrase (optional)</label>
       <input type="text" id="modalPassphrase" placeholder="Enter a passphrase or leave empty..." />
-      <p style="font-size:11px;color:#999;margin:0">A passphrase makes it easier to remember. If left empty, only the recovery key can be used.</p>
+      <p style="font-size:12px;color:var(--text-muted);margin:0">A passphrase makes it easier to remember.</p>
     </div>
     <div class="btn-row">
-      <button class="btn-secondary" onclick="hideModal()">Skip</button>
-      <button class="btn-primary" id="modalSetupBtn" onclick="doModalSetupRecovery()">Set Up Encryption</button>
+      <button class="modal-btn modal-btn-secondary" onclick="hideModal()">Skip</button>
+      <button class="modal-btn modal-btn-primary" id="modalSetupBtn" onclick="doModalSetupRecovery()">Set Up Encryption</button>
     </div>
   `);
 }
@@ -375,12 +438,9 @@ window.doModalSetupRecovery = async () => {
   btn.innerHTML = '<span class="spinner"></span> Setting up...';
 
   try {
-    // Setup recovery (creates secret storage + key backup)
     log('Setting up recovery...', 'event');
     const result = await Matrix.setupRecovery({ passphrase });
     log('Recovery setup complete', 'success');
-
-    // Show recovery key to the user
     showRecoveryKeyModal(result.recoveryKey);
   } catch (e) {
     if (e.message?.includes('BACKUP_EXISTS')) {
@@ -400,9 +460,9 @@ function showRecoveryKeyModal(recoveryKey) {
     <p>This key is the <strong>only way</strong> to restore your encrypted messages if you lose access. Save it somewhere safe!</p>
     <div class="recovery-key-display" id="recoveryKeyDisplay">${esc(recoveryKey)}</div>
     <div class="btn-row">
-      <button class="btn-secondary" onclick="doCopyRecoveryKey()">Copy</button>
-      <button class="btn-primary" onclick="doDownloadRecoveryKey()">Download</button>
-      <button class="btn-primary" onclick="hideModal()">I've Saved It</button>
+      <button class="modal-btn modal-btn-secondary" onclick="doCopyRecoveryKey()">Copy</button>
+      <button class="modal-btn modal-btn-secondary" onclick="doDownloadRecoveryKey()">Download</button>
+      <button class="modal-btn modal-btn-primary" onclick="hideModal()">I've Saved It</button>
     </div>
   `);
 }
@@ -419,7 +479,7 @@ window.doCopyRecoveryKey = () => {
 window.doDownloadRecoveryKey = () => {
   const key = document.getElementById('recoveryKeyDisplay')?.textContent;
   if (key) {
-    const blob = new Blob([`Matrix Recovery Key\n\n${key}\n\nStore this key safely. You'll need it to verify new devices.\n`], { type: 'text/plain' });
+    const blob = new Blob([`Matrix Recovery Key\n\n${key}\n\nStore this key safely.\n`], { type: 'text/plain' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'matrix-recovery-key.txt';
@@ -435,11 +495,11 @@ function showRecoverModal() {
     <p>This device isn't verified yet. Enter your recovery key or passphrase to unlock your encrypted messages.</p>
     <div class="step">
       <label><span class="step-num">1</span> Recovery Key or Passphrase</label>
-      <input type="text" id="modalRecoveryInput" placeholder="Enter recovery key (EsXa K2g1...)  or passphrase..." />
+      <input type="text" id="modalRecoveryInput" placeholder="Enter recovery key or passphrase..." />
     </div>
     <div class="btn-row">
-      <button class="btn-secondary" onclick="hideModal()">Skip</button>
-      <button class="btn-primary" id="modalRecoverBtn" onclick="doModalRecover()">Verify Device</button>
+      <button class="modal-btn modal-btn-secondary" onclick="hideModal()">Skip</button>
+      <button class="modal-btn modal-btn-primary" id="modalRecoverBtn" onclick="doModalRecover()">Verify Device</button>
     </div>
   `);
 }
@@ -452,7 +512,6 @@ window.doModalRecover = async () => {
   btn.innerHTML = '<span class="spinner"></span> Verifying...';
 
   try {
-    // Detect if it's a recovery key (starts with "Es" and has spaces/groups) or a passphrase
     const isRecoveryKey = /^[A-Za-z0-9]{4}(\s+[A-Za-z0-9]{4})+$/.test(input);
 
     if (isRecoveryKey) {
@@ -466,19 +525,14 @@ window.doModalRecover = async () => {
     log('Device verified successfully', 'success');
     hideModal();
 
-    // Re-check status
     const status = await Matrix.getEncryptionStatus();
     logResult('Encryption status after recovery', status);
 
-    // Reload messages in the current room to retry decryption
     if (selectedRoomId) {
-      try {
-        await loadMessages(selectedRoomId);
-      } catch (_) {}
+      try { await loadMessages(selectedRoomId); } catch (_) {}
     }
   } catch (e) {
     logError('recover', e);
-    // Show error with reset option
     showRecoverErrorModal(e.message || String(e));
   }
 };
@@ -486,11 +540,11 @@ window.doModalRecover = async () => {
 function showRecoverErrorModal(errorMsg) {
   showModal(`
     <h2>Recovery Failed</h2>
-    <p style="color:#d32f2f">${esc(errorMsg)}</p>
-    <p>This can happen if the encryption keys were corrupted or changed. You can reset encryption to start fresh — this will create new keys but you may lose access to old encrypted messages.</p>
+    <p style="color:var(--red)">${esc(errorMsg)}</p>
+    <p>You can try again or reset encryption to start fresh (you may lose access to old messages).</p>
     <div class="btn-row">
-      <button class="btn-secondary" onclick="showRecoverModal()">Try Again</button>
-      <button class="btn-danger" id="modalResetBtn" onclick="doModalReset()">Reset Encryption</button>
+      <button class="modal-btn modal-btn-secondary" onclick="showRecoverModal()">Try Again</button>
+      <button class="modal-btn modal-btn-danger" id="modalResetBtn" onclick="doModalReset()">Reset Encryption</button>
     </div>
   `);
 }
@@ -501,12 +555,9 @@ window.doModalReset = async () => {
   btn.innerHTML = '<span class="spinner"></span> Resetting...';
 
   try {
-    // Setup fresh recovery (new secret storage + key backup)
-    log('Resetting encryption — creating new secret storage...', 'event');
+    log('Resetting encryption...', 'event');
     const result = await Matrix.setupRecovery({});
     log('New recovery created', 'success');
-
-    // Show the new recovery key
     showRecoveryKeyModal(result.recoveryKey);
   } catch (e) {
     logError('reset', e);
@@ -515,7 +566,6 @@ window.doModalReset = async () => {
   }
 };
 
-// Make modal functions available globally
 window.hideModal = hideModal;
 window.showRecoverModal = showRecoverModal;
 
@@ -570,7 +620,7 @@ window.doGetKeyBackupStatus = async () => {
 };
 
 window.doSetupRecovery = async () => {
-  const passphrase = document.getElementById('passphraseInput').value.trim() || undefined;
+  const passphrase = (document.getElementById('passphraseInput')?.value || document.getElementById('passphraseInputM')?.value || '').trim() || undefined;
   log(`Setting up recovery${passphrase ? ' with passphrase' : ''}...`);
   try {
     const result = await Matrix.setupRecovery({ passphrase });
@@ -595,7 +645,7 @@ window.doIsRecoveryEnabled = async () => {
 };
 
 window.doRecoverAndSetup = async () => {
-  const recoveryKey = document.getElementById('recoveryKeyInput').value.trim();
+  const recoveryKey = (document.getElementById('recoveryKeyInput')?.value || document.getElementById('recoveryKeyInputM')?.value || '').trim();
   if (!recoveryKey) return log('Enter a recovery key', 'error');
 
   log('Recovering...');
@@ -620,24 +670,127 @@ window.doResetRecoveryKey = async () => {
 
 // ── Create Room ────────────────────────────────────────
 
-window.doCreateRoom = async () => {
-  const name = document.getElementById('createRoomName').value.trim();
-  const topic = document.getElementById('createRoomTopic').value.trim();
-  const inviteRaw = document.getElementById('createRoomInvite').value.trim();
-  const isEncrypted = document.getElementById('createRoomEncrypted').checked;
+let selectedInviteUsers = [];
+let userSearchTimeout = null;
+
+window.showCreateRoomModal = () => {
+  selectedInviteUsers = [];
+  renderSelectedUsers();
+  document.getElementById('createRoomModal').classList.add('active');
+};
+
+window.hideCreateRoomModal = () => {
+  document.getElementById('createRoomModal').classList.remove('active');
+  document.getElementById('userSearchResults').style.display = 'none';
+  document.getElementById('userSearchInput').value = '';
+  selectedInviteUsers = [];
+  renderSelectedUsers();
+};
+
+window.onUserSearchInput = () => {
+  clearTimeout(userSearchTimeout);
+  const term = document.getElementById('userSearchInput').value.trim();
+  const resultsEl = document.getElementById('userSearchResults');
+  if (term.length < 2) {
+    resultsEl.style.display = 'none';
+    return;
+  }
+  userSearchTimeout = setTimeout(async () => {
+    try {
+      const { results } = await Matrix.searchUsers({ searchTerm: term, limit: 8 });
+      // Filter out already-selected users and current user
+      const filtered = results.filter(
+        (u) => u.userId !== currentUserId && !selectedInviteUsers.some((s) => s.userId === u.userId),
+      );
+      if (filtered.length === 0) {
+        resultsEl.style.display = 'none';
+        return;
+      }
+      resultsEl.innerHTML = '';
+      filtered.forEach((u) => {
+        const initials = (u.displayName || u.userId).replace('@', '').substring(0, 2).toUpperCase();
+        const color = roomColor(u.userId);
+        const item = document.createElement('div');
+        item.className = 'user-search-item';
+        item.innerHTML = `
+          <div class="user-search-avatar" style="background:${color}">${initials}</div>
+          <div class="user-search-info">
+            <div class="user-search-name">${esc(u.displayName || u.userId)}</div>
+            <div class="user-search-id">${esc(u.userId)}</div>
+          </div>
+        `;
+        item.onclick = () => {
+          selectedInviteUsers.push(u);
+          renderSelectedUsers();
+          document.getElementById('userSearchInput').value = '';
+          resultsEl.style.display = 'none';
+        };
+        resultsEl.appendChild(item);
+      });
+      resultsEl.style.display = 'block';
+    } catch (e) {
+      // Silently fail — user can still type IDs manually
+    }
+  }, 300);
+};
+
+function renderSelectedUsers() {
+  const container = document.getElementById('selectedUsers');
+  container.innerHTML = '';
+  selectedInviteUsers.forEach((u, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'user-chip';
+    chip.innerHTML = `${esc(u.displayName || u.userId)} <button onclick="removeInviteUser(${i})">&times;</button>`;
+    container.appendChild(chip);
+  });
+}
+
+window.removeInviteUser = (index) => {
+  selectedInviteUsers.splice(index, 1);
+  renderSelectedUsers();
+};
+
+window.doCreateRoomFromModal = async () => {
+  const name = document.getElementById('createRoomNameModal').value.trim();
+  const topic = document.getElementById('createRoomTopicModal').value.trim();
+  const isEncrypted = document.getElementById('createRoomEncryptedModal').checked;
 
   if (!name) return log('Enter a room name', 'error');
 
-  const invite = inviteRaw ? inviteRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  // Combine selected users + any manually typed user in the search field
+  const invite = selectedInviteUsers.map((u) => u.userId);
+  const manualInput = document.getElementById('userSearchInput').value.trim();
+  if (manualInput && manualInput.startsWith('@')) {
+    invite.push(manualInput);
+  }
 
-  log(`Creating room "${name}"${isEncrypted ? ' (encrypted)' : ''}...`);
+  log(`Creating room "${name}"${invite.length ? ` with ${invite.length} invites` : ''}...`);
   try {
     const result = await Matrix.createRoom({ name, topic: topic || undefined, isEncrypted, invite });
     logResult('Room created', result);
-    document.getElementById('createRoomName').value = '';
-    document.getElementById('createRoomTopic').value = '';
-    document.getElementById('createRoomInvite').value = '';
-    document.getElementById('createRoomEncrypted').checked = false;
+    hideCreateRoomModal();
+    document.getElementById('createRoomNameModal').value = '';
+    document.getElementById('createRoomTopicModal').value = '';
+    document.getElementById('createRoomEncryptedModal').checked = false;
+    await window.doGetRooms();
+  } catch (e) {
+    logError('createRoom', e);
+  }
+};
+
+window.doCreateRoom = async () => {
+  const name = (document.getElementById('createRoomName')?.value || document.getElementById('createRoomNameM')?.value || '').trim();
+  const topic = (document.getElementById('createRoomTopic')?.value || document.getElementById('createRoomTopicM')?.value || '').trim();
+  const inviteRaw = (document.getElementById('createRoomInvite')?.value || document.getElementById('createRoomInviteM')?.value || '').trim();
+  const isEncrypted = document.getElementById('createRoomEncrypted')?.checked || document.getElementById('createRoomEncryptedM')?.checked || false;
+
+  if (!name) return log('Enter a room name', 'error');
+  const invite = inviteRaw ? inviteRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+
+  log(`Creating room "${name}"...`);
+  try {
+    const result = await Matrix.createRoom({ name, topic: topic || undefined, isEncrypted, invite });
+    logResult('Room created', result);
     await window.doGetRooms();
   } catch (e) {
     logError('createRoom', e);
@@ -646,11 +799,30 @@ window.doCreateRoom = async () => {
 
 // ── Rooms ──────────────────────────────────────────────
 
+const ROOM_COLORS = [
+  '#6366f1', '#ec4899', '#f59e0b', '#10b981', '#8b5cf6',
+  '#ef4444', '#06b6d4', '#f97316', '#14b8a6', '#a855f7',
+];
+
+function roomColor(roomId) {
+  let hash = 0;
+  for (let i = 0; i < roomId.length; i++) hash = roomId.charCodeAt(i) + ((hash << 5) - hash);
+  return ROOM_COLORS[Math.abs(hash) % ROOM_COLORS.length];
+}
+
+function roomInitials(name) {
+  if (!name) return '?';
+  const words = name.trim().split(/\s+/);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return name.substring(0, 2).toUpperCase();
+}
+
 window.doGetRooms = async () => {
   log('Fetching rooms...');
   try {
     const result = await Matrix.getRooms();
     const rooms = result.rooms || [];
+    currentRooms = rooms;
     logResult(`Got ${rooms.length} rooms`, rooms.map((r) => r.name || r.roomId));
     renderRoomList(rooms);
   } catch (e) {
@@ -663,11 +835,20 @@ function renderRoomList(rooms) {
   list.innerHTML = '';
   rooms.forEach((room) => {
     const li = document.createElement('li');
+    li.className = `room-item${room.roomId === selectedRoomId ? ' active' : ''}`;
     li.dataset.roomId = room.roomId;
-    if (room.roomId === selectedRoomId) li.classList.add('selected');
+
+    const color = roomColor(room.roomId);
+    const initials = roomInitials(room.name);
+    const encIcon = room.isEncrypted ? '<span class="room-encrypted-icon">&#128274;</span>' : '';
+
     li.innerHTML = `
-      <div class="room-name">${room.name || '(unnamed)'}</div>
-      <div class="room-meta">${room.roomId} | ${room.memberCount} members | ${room.unreadCount} unread${room.isEncrypted ? ' | \u{1F512}' : ''}</div>
+      <div class="room-avatar" style="background:${color}">${initials}</div>
+      <div class="room-item-info">
+        <div class="room-item-name">${esc(room.name || '(unnamed)')}${encIcon}</div>
+        <div class="room-item-preview">${room.memberCount} member${room.memberCount !== 1 ? 's' : ''}</div>
+      </div>
+      ${room.unreadCount > 0 ? `<div class="room-item-meta"><div class="room-unread-badge">${room.unreadCount}</div></div>` : ''}
     `;
     li.onclick = () => selectRoom(room);
     list.appendChild(li);
@@ -676,26 +857,39 @@ function renderRoomList(rooms) {
 
 function selectRoom(room) {
   selectedRoomId = room.roomId;
-  document.getElementById('roomDetail').classList.remove('hidden');
-  document.getElementById('roomDetailName').textContent = room.name || '(unnamed)';
-  document.getElementById('roomDetailId').textContent = room.roomId;
 
-  // Highlight selected room in list
-  document.querySelectorAll('.room-list li').forEach((li, i) => {
-    li.classList.toggle('selected', li.dataset.roomId === room.roomId);
+  // Update room list highlight
+  document.querySelectorAll('.room-item').forEach((li) => {
+    li.classList.toggle('active', li.dataset.roomId === room.roomId);
   });
 
-  // Show encryption badge
-  const badge = document.getElementById('roomEncBadge');
-  badge.classList.toggle('hidden', !room.isEncrypted);
-  if (room.isEncrypted) badge.classList.add('encrypted');
+  // Show chat view
+  document.getElementById('chatEmpty').classList.add('hidden');
+  const chatView = document.getElementById('chatView');
+  chatView.classList.remove('hidden');
+
+  // Update header
+  document.getElementById('chatRoomName').textContent = room.name || '(unnamed)';
+  const detail = [];
+  if (room.memberCount) detail.push(`${room.memberCount} members`);
+  if (room.isEncrypted) detail.push('Encrypted');
+  document.getElementById('chatRoomDetail').textContent = detail.join(' · ');
+
+  // Mobile: slide to chat
+  document.getElementById('sidebar').classList.add('room-open');
+  document.getElementById('chatArea').classList.add('room-open');
 
   log(`Selected room: ${room.name} (${room.roomId})`);
   loadConversation();
 }
 
+window.goBackToRooms = () => {
+  document.getElementById('sidebar').classList.remove('room-open');
+  document.getElementById('chatArea').classList.remove('room-open');
+};
+
 window.doJoinRoom = async () => {
-  const roomIdOrAlias = document.getElementById('joinRoomInput').value.trim();
+  const roomIdOrAlias = (document.getElementById('joinRoomInput')?.value || document.getElementById('joinRoomInputM')?.value || '').trim();
   if (!roomIdOrAlias) return log('Enter a room ID or alias', 'error');
 
   log(`Joining ${roomIdOrAlias}...`);
@@ -715,7 +909,10 @@ window.doLeaveRoom = async () => {
     await Matrix.leaveRoom({ roomId: selectedRoomId });
     log('Left room', 'success');
     selectedRoomId = null;
-    document.getElementById('roomDetail').classList.add('hidden');
+    document.getElementById('chatView').classList.add('hidden');
+    document.getElementById('chatEmpty').classList.remove('hidden');
+    closeRoomDrawer();
+    goBackToRooms();
     window.doGetRooms();
   } catch (e) {
     logError('leaveRoom', e);
@@ -736,19 +933,26 @@ window.doGetRoomMembers = async () => {
   }
 };
 
-window.doGetRoomMessages = async () => {
-  if (!selectedRoomId) return;
-  log(`Fetching messages for ${selectedRoomId}...`);
-  try {
-    const result = await Matrix.getRoomMessages({
-      roomId: selectedRoomId,
-      limit: 50,
-    });
-    const events = result.events || [];
-    logResult(`${events.length} messages`, events.map((e) => `${e.senderId}: ${e.content?.body || e.type}`));
-  } catch (e) {
-    logError('getRoomMessages', e);
-  }
+// ── Room Drawer ───────────────────────────────────────
+
+window.openRoomDrawer = () => {
+  document.getElementById('roomDrawerOverlay').classList.add('active');
+  document.getElementById('roomDrawer').classList.add('active');
+};
+
+window.closeRoomDrawer = () => {
+  document.getElementById('roomDrawerOverlay').classList.remove('active');
+  document.getElementById('roomDrawer').classList.remove('active');
+};
+
+window.showSettingsDrawer = () => {
+  document.getElementById('settingsOverlay').classList.add('active');
+  document.getElementById('settingsDrawer').classList.add('active');
+};
+
+window.closeSettingsDrawer = () => {
+  document.getElementById('settingsOverlay').classList.remove('active');
+  document.getElementById('settingsDrawer').classList.remove('active');
 };
 
 // ── Conversation View ─────────────────────────────────
@@ -765,87 +969,127 @@ async function loadConversation() {
     const events = result.events || [];
     msgList.innerHTML = '';
     if (events.length === 0) {
-      msgList.innerHTML = '<div class="msg-system">No messages yet</div>';
+      msgList.innerHTML = '<div class="msg-system">No messages yet. Say hello!</div>';
       return;
     }
-    events.forEach((evt) => renderMessage(evt));
+    // Separate reactions from other events
+    const reactions = [];
+    const displayEvents = [];
+    for (const evt of events) {
+      if (evt.type === 'm.reaction') {
+        reactions.push(evt);
+      } else {
+        displayEvents.push(evt);
+      }
+    }
+    displayEvents.forEach((evt) => renderMessage(evt));
+    // Apply reactions from web (separate m.reaction events)
+    for (const r of reactions) {
+      const rel = r.content?.['m.relates_to'];
+      if (rel?.event_id && rel?.key) {
+        addReactionChip(rel.event_id, rel.key);
+      }
+    }
+    // Apply reactions from Android (aggregated in content.reactions)
+    for (const evt of displayEvents) {
+      const aggReactions = evt.content?.reactions;
+      if (Array.isArray(aggReactions) && evt.eventId) {
+        for (const r of aggReactions) {
+          for (let i = 0; i < (r.count || 1); i++) {
+            addReactionChip(evt.eventId, r.key);
+          }
+        }
+      }
+    }
     msgList.scrollTop = msgList.scrollHeight;
   } catch (e) {
-    msgList.innerHTML = `<div class="msg-system">Error loading messages</div>`;
+    msgList.innerHTML = '<div class="msg-system">Error loading messages</div>';
     logError('loadConversation', e);
   }
+}
+
+async function loadMessages(roomId) {
+  if (roomId !== selectedRoomId) return;
+  await loadConversation();
 }
 
 function renderMessage(evt) {
   const msgList = document.getElementById('messageList');
   const isMine = evt.senderId === currentUserId;
 
-  // State events (member joins, room creation, etc.)
+  // State events
   if (evt.type !== 'm.room.message') {
     const sys = document.createElement('div');
     sys.className = 'msg-system';
     const label = evt.type === 'm.room.member' ? `${evt.senderId} ${evt.content?.membership || 'updated'}` :
-                  evt.type === 'm.room.encrypted' ? `\u{1F512} Encrypted event` :
+                  evt.type === 'm.room.encrypted' ? 'Encrypted event' :
                   `${evt.type}`;
     sys.textContent = label;
     msgList.appendChild(sys);
     return;
   }
 
-  const bubble = document.createElement('div');
-  bubble.className = `msg-bubble ${isMine ? 'mine' : 'other'}`;
-  if (evt.eventId) bubble.dataset.eventId = evt.eventId;
+  const group = document.createElement('div');
+  group.className = `msg-group ${isMine ? 'mine' : 'other'}`;
+  if (evt.eventId) group.dataset.eventId = evt.eventId;
 
   const body = evt.content?.body || '';
   const msgtype = evt.content?.msgtype || 'm.text';
   const time = new Date(evt.originServerTs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const senderInitials = (evt.senderId || '??').replace('@', '').substring(0, 2).toUpperCase();
+  const color = roomColor(evt.senderId || '');
 
-  let html = '';
-  if (!isMine) {
-    html += `<div class="msg-sender">${esc(evt.senderId)}</div>`;
-  }
+  let bubbleHtml = '';
 
   // Media rendering
   if (msgtype === 'm.image' && evt.content?.url) {
-    html += `<div class="media-preview"><img src="" data-mxc="${esc(evt.content.url)}" alt="${esc(body)}" onclick="window.open(this.src)" /></div>`;
-    if (body) html += `<div style="font-size:11px;color:#777">${esc(body)}</div>`;
+    bubbleHtml += `<div class="media-preview"><img src="" data-mxc="${esc(evt.content.url)}" alt="${esc(body)}" onclick="window.open(this.src)" /></div>`;
+    if (body) bubbleHtml += `<div style="font-size:12px;opacity:0.7;margin-top:4px">${esc(body)}</div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.audio' && evt.content?.url) {
-    html += `<div class="media-preview"><audio controls src="" data-mxc="${esc(evt.content.url)}"></audio></div>`;
-    if (body) html += `<div style="font-size:11px;color:#777">${esc(body)}</div>`;
+    bubbleHtml += `<div class="media-preview"><audio controls src="" data-mxc="${esc(evt.content.url)}"></audio></div>`;
+    if (body) bubbleHtml += `<div style="font-size:12px;opacity:0.7;margin-top:4px">${esc(body)}</div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.video' && evt.content?.url) {
-    html += `<div class="media-preview"><video controls src="" data-mxc="${esc(evt.content.url)}" style="max-width:250px"></video></div>`;
-    if (body) html += `<div style="font-size:11px;color:#777">${esc(body)}</div>`;
+    bubbleHtml += `<div class="media-preview"><video controls src="" data-mxc="${esc(evt.content.url)}" style="max-width:280px"></video></div>`;
+    if (body) bubbleHtml += `<div style="font-size:12px;opacity:0.7;margin-top:4px">${esc(body)}</div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.file' && evt.content?.url) {
-    html += `<div class="media-preview"><a href="#" data-mxc="${esc(evt.content.url)}" onclick="downloadMedia(this,event)">\u{1F4CE} ${esc(body || 'Download file')}</a></div>`;
+    bubbleHtml += `<div class="media-preview"><a href="#" data-mxc="${esc(evt.content.url)}" onclick="downloadMedia(this,event)">&#128206; ${esc(body || 'Download file')}</a></div>`;
     resolveMediaUrl(evt.content.url);
   } else if (msgtype === 'm.emote') {
-    html += `<em>* ${esc(evt.senderId)} ${esc(body)}</em>`;
+    bubbleHtml += `<em>* ${esc(evt.senderId)} ${esc(body)}</em>`;
   } else if (msgtype === 'm.notice') {
-    html += `<span style="color:#888">${esc(body)}</span>`;
+    bubbleHtml += `<span style="opacity:0.7">${esc(body)}</span>`;
   } else {
-    html += esc(body);
+    bubbleHtml += esc(body);
   }
 
-  html += `<div class="msg-time">${time}</div>`;
+  bubbleHtml += `<div class="msg-time">${time}</div>`;
 
-  // Action buttons (react + delete)
+  // Actions
+  let actionsHtml = '';
   if (evt.eventId && !evt.eventId.startsWith('local-')) {
-    html += `<div class="msg-actions">`;
-    html += `<button onclick="doReact('${evt.eventId}','\u{1F44D}')">&#128077;</button>`;
-    html += `<button onclick="doReact('${evt.eventId}','\u2764\uFE0F')">&#10084;&#65039;</button>`;
-    html += `<button onclick="doReact('${evt.eventId}','\u{1F602}')">&#128514;</button>`;
+    actionsHtml += `<div class="msg-actions-bar">`;
+    actionsHtml += `<button class="msg-action-btn" onclick="doReact('${evt.eventId}','\\u{1F44D}')">&#128077;</button>`;
+    actionsHtml += `<button class="msg-action-btn" onclick="doReact('${evt.eventId}','\\u2764\\uFE0F')">&#10084;&#65039;</button>`;
+    actionsHtml += `<button class="msg-action-btn" onclick="doReact('${evt.eventId}','\\u{1F602}')">&#128514;</button>`;
     if (isMine) {
-      html += `<button onclick="doRedact('${evt.eventId}')" title="Delete" style="color:#f44336">&#10005;</button>`;
+      actionsHtml += `<button class="msg-action-btn" onclick="doRedact('${evt.eventId}')" title="Delete" style="color:var(--red)">&#10005;</button>`;
     }
-    html += `</div>`;
-    html += `<div class="msg-reactions" id="reactions-${evt.eventId}"></div>`;
+    actionsHtml += `</div>`;
+    actionsHtml += `<div class="msg-reactions-bar" id="reactions-${evt.eventId}"></div>`;
   }
 
-  bubble.innerHTML = html;
-  msgList.appendChild(bubble);
+  group.innerHTML = `
+    <div class="msg-avatar" style="background:${color}">${senderInitials}</div>
+    <div class="msg-content-wrap">
+      <div class="msg-sender-name">${esc(evt.senderId)}</div>
+      <div class="msg-bubble">${bubbleHtml}</div>
+      ${actionsHtml}
+    </div>
+  `;
+  msgList.appendChild(group);
 }
 
 async function resolveMediaUrl(mxcUrl) {
@@ -859,7 +1103,7 @@ async function resolveMediaUrl(mxcUrl) {
       }
     });
   } catch (e) {
-    // silently fail for media URL resolution
+    // silently fail
   }
 }
 
@@ -892,7 +1136,6 @@ window.doSendMessage = async () => {
   if (!body) return;
 
   input.value = '';
-  // Optimistically render
   renderMessage({
     eventId: 'local-' + Date.now(),
     roomId: selectedRoomId,
@@ -905,19 +1148,33 @@ window.doSendMessage = async () => {
   msgList.scrollTop = msgList.scrollHeight;
 
   try {
-    const result = await Matrix.sendMessage({
-      roomId: selectedRoomId,
-      body,
-    });
+    const result = await Matrix.sendMessage({ roomId: selectedRoomId, body });
     log(`Sent: ${result.eventId}`, 'success');
+    // Upgrade the optimistic placeholder with the real server eventId + action buttons
+    const localEl = document.querySelector('[data-event-id^="local-"]');
+    if (localEl) {
+      localEl.dataset.eventId = result.eventId;
+      // Add action/reaction buttons directly into .msg-content-wrap (no wrapper div)
+      const wrap = localEl.querySelector('.msg-content-wrap');
+      if (wrap) {
+        const actionsBar = document.createElement('div');
+        actionsBar.className = 'msg-actions-bar';
+        actionsBar.innerHTML = `
+          <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F44D}')">&#128077;</button>
+          <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u2764\\uFE0F')">&#10084;&#65039;</button>
+          <button class="msg-action-btn" onclick="doReact('${result.eventId}','\\u{1F602}')">&#128514;</button>
+          <button class="msg-action-btn" onclick="doRedact('${result.eventId}')" title="Delete" style="color:var(--red)">&#10005;</button>
+        `;
+        wrap.appendChild(actionsBar);
+
+        const reactionsBar = document.createElement('div');
+        reactionsBar.className = 'msg-reactions-bar';
+        reactionsBar.id = `reactions-${result.eventId}`;
+        wrap.appendChild(reactionsBar);
+      }
+    }
   } catch (e) {
     logError('sendMessage', e);
-    // Show error inline
-    const err = document.createElement('div');
-    err.className = 'msg-system';
-    err.textContent = `Failed to send: ${e.message || e}`;
-    err.style.color = '#f44336';
-    msgList.appendChild(err);
   }
 };
 
@@ -930,7 +1187,7 @@ window.doRedact = async (eventId) => {
     log(`Redacted ${eventId}`, 'success');
     const el = document.querySelector(`[data-event-id="${eventId}"]`);
     if (el) {
-      el.innerHTML = '<em style="color:#999">Message deleted</em>';
+      el.innerHTML = '<em style="color:var(--text-muted)">Message deleted</em>';
       el.className = 'msg-system';
     }
   } catch (e) {
@@ -940,10 +1197,13 @@ window.doRedact = async (eventId) => {
 
 window.doReact = async (eventId, key) => {
   if (!selectedRoomId) return;
+  // Add chip optimistically before the network call
+  addReactionChip(eventId, key);
+  const msgList = document.getElementById('messageList');
+  msgList.scrollTop = msgList.scrollHeight;
   try {
     await Matrix.sendReaction({ roomId: selectedRoomId, eventId, key });
     log(`Reacted ${key} to ${eventId}`, 'success');
-    addReactionChip(eventId, key);
   } catch (e) {
     logError('sendReaction', e);
   }
@@ -958,7 +1218,7 @@ window.doSetRoomName = async () => {
   try {
     await Matrix.setRoomName({ roomId: selectedRoomId, name });
     log(`Room name set to "${name}"`, 'success');
-    document.getElementById('roomDetailName').textContent = name;
+    document.getElementById('chatRoomName').textContent = name;
   } catch (e) {
     logError('setRoomName', e);
   }
@@ -970,7 +1230,7 @@ window.doSetRoomTopic = async () => {
   if (!topic) return;
   try {
     await Matrix.setRoomTopic({ roomId: selectedRoomId, topic });
-    log(`Room topic set`, 'success');
+    log('Room topic set', 'success');
   } catch (e) {
     logError('setRoomTopic', e);
   }
@@ -1069,7 +1329,6 @@ window.doSendFile = async () => {
     URL.revokeObjectURL(fileUri);
     log(`File sent: ${result.eventId}`, 'success');
 
-    // Optimistically render
     renderMessage({
       eventId: result.eventId,
       roomId: selectedRoomId,
@@ -1086,7 +1345,37 @@ window.doSendFile = async () => {
   fileInput.value = '';
 };
 
+// ── Debug Panel ───────────────────────────────────────
+
+window.toggleDebug = () => {
+  document.getElementById('debugPanel').classList.toggle('active');
+};
+
+window.toggleDebugMobile = () => {
+  const sheet = document.getElementById('debugSheet');
+  const overlay = document.getElementById('debugSheetOverlay');
+  sheet.classList.toggle('active');
+  overlay.classList.toggle('active');
+};
+
+window.switchDebugTab = (btn, tab) => {
+  const container = btn.closest('.debug-panel, .debug-sheet');
+  container.querySelectorAll('.debug-tab').forEach((t) => t.classList.remove('active'));
+  container.querySelectorAll('.debug-tab-content').forEach((c) => c.classList.remove('active'));
+  btn.classList.add('active');
+  container.querySelector(`[data-tab-content="${tab}"]`).classList.add('active');
+};
+
 // ── Init ───────────────────────────────────────────────
+
+// Close user search dropdown when clicking outside
+document.addEventListener('click', (e) => {
+  const results = document.getElementById('userSearchResults');
+  const input = document.getElementById('userSearchInput');
+  if (results && !results.contains(e.target) && e.target !== input) {
+    results.style.display = 'none';
+  }
+});
 
 log('Matrix plugin test app loaded');
 
@@ -1106,6 +1395,7 @@ log('Matrix plugin test app loaded');
         deviceId: session.deviceId,
       });
       setStatus(`Logged in as ${session.userId}`, 'connected');
+      showApp();
       await startSyncAndLoadRooms();
     }
   } catch (e) {

@@ -41,6 +41,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "kickUser", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "banUser", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "unbanUser", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "searchUsers", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendTyping", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getMediaUrl", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPresence", returnType: CAPPluginReturnPromise),
@@ -449,6 +450,22 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
             do {
                 try await bridge.sendReaction(roomId: roomId, eventId: eventId, key: key)
                 call.resolve(["eventId": ""])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func searchUsers(_ call: CAPPluginCall) {
+        guard let searchTerm = call.getString("searchTerm") else {
+            return call.reject("Missing searchTerm")
+        }
+        let limit = call.getInt("limit") ?? 10
+
+        Task {
+            do {
+                let result = try await bridge.searchUsers(searchTerm: searchTerm, limit: limit)
+                call.resolve(result)
             } catch {
                 call.reject(error.localizedDescription)
             }

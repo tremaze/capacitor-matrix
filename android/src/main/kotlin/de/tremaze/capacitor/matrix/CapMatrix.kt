@@ -51,6 +51,7 @@ class MatrixSDKBridge(private val context: Context) {
     private var client: Client? = null
     private var syncService: SyncService? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val subscribedRoomIds = mutableSetOf<String>()
 
     private val sessionStore by lazy { MatrixSessionStore(context) }
 
@@ -155,15 +156,71 @@ class MatrixSDKBridge(private val context: Context) {
 
         service.state(object : SyncServiceStateObserver {
             override fun onUpdate(state: SyncServiceState) {
-                onSyncState(mapSyncState(state))
+                val mapped = mapSyncState(state)
+                onSyncState(mapped)
+                // When sync reaches SYNCING, subscribe to room timelines
+                if (mapped == "SYNCING") {
+                    scope.launch {
+                        subscribeToRoomTimelines(c, onMessage, onRoomUpdate)
+                    }
+                }
             }
         })
 
         service.start()
     }
 
+    private suspend fun subscribeToRoomTimelines(
+        c: Client,
+        onMessage: (Map<String, Any?>) -> Unit,
+        onRoomUpdate: (String, Map<String, Any?>) -> Unit,
+    ) {
+        for (room in c.rooms()) {
+            val roomId = room.id()
+            if (subscribedRoomIds.contains(roomId)) continue
+            subscribedRoomIds.add(roomId)
+            try {
+                val timeline = room.timeline()
+                timeline.addListener(object : TimelineListener {
+                    override fun onUpdate(diff: List<TimelineDiff>) {
+                        for (d in diff) {
+                            // Only fire for new events (PushBack/Append), not initial loads
+                            when (d) {
+                                is TimelineDiff.PushBack -> {
+                                    serializeTimelineItem(d.value, roomId)?.let { event ->
+                                        onMessage(event)
+                                    }
+                                    onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                }
+                                is TimelineDiff.Append -> {
+                                    d.values.forEach { item ->
+                                        serializeTimelineItem(item, roomId)?.let { event ->
+                                            onMessage(event)
+                                        }
+                                    }
+                                    onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                }
+                                is TimelineDiff.Set -> {
+                                    // Set means an existing item was updated (e.g. reactions changed)
+                                    serializeTimelineItem(d.value, roomId)?.let { event ->
+                                        onMessage(event)
+                                    }
+                                }
+                                else -> {}
+                            }
+                        }
+                    }
+                })
+                android.util.Log.d("CapMatrix", "Subscribed to timeline for room $roomId")
+            } catch (e: Exception) {
+                android.util.Log.e("CapMatrix", "Failed to subscribe to room $roomId: ${e.message}")
+            }
+        }
+    }
+
     suspend fun stopSync() {
         syncService?.stop()
+        subscribedRoomIds.clear()
     }
 
     fun getSyncState(): String {
@@ -462,6 +519,23 @@ class MatrixSDKBridge(private val context: Context) {
         return mapOf("recoveryKey" to key)
     }
 
+    // ── User Discovery ─────────────────────────────────────
+
+    suspend fun searchUsers(searchTerm: String, limit: Long): Map<String, Any?> {
+        val c = requireClient()
+        val result = c.searchUsers(searchTerm, limit.toULong())
+        return mapOf(
+            "results" to result.results.map { u ->
+                mapOf(
+                    "userId" to u.userId,
+                    "displayName" to u.displayName,
+                    "avatarUrl" to u.avatarUrl,
+                )
+            },
+            "limited" to result.limited,
+        )
+    }
+
     // ── Helpers ───────────────────────────────────────────
 
     private fun requireClient(): Client {
@@ -541,8 +615,27 @@ class MatrixSDKBridge(private val context: Context) {
                             contentMap["encrypted"] = true
                             android.util.Log.d("CapMatrix", "  UTD msg: ${kind.msg}")
                         }
+                        is MsgLikeKind.Redacted -> {
+                            eventType = "m.room.redaction"
+                            contentMap["body"] = "Message deleted"
+                        }
+                        is MsgLikeKind.Other -> {
+                            eventType = kind.eventType.toString()
+                            android.util.Log.d("CapMatrix", "  Other event type: ${kind.eventType}")
+                        }
                         else -> {
                             android.util.Log.d("CapMatrix", "  Unhandled MsgLikeKind: ${kind::class.simpleName}")
+                        }
+                    }
+                    // Aggregate reactions from the Rust SDK
+                    val reactions = content.content.reactions
+                    if (reactions.isNotEmpty()) {
+                        contentMap["reactions"] = reactions.map { r ->
+                            mapOf(
+                                "key" to r.key,
+                                "count" to r.senders.size,
+                                "senders" to r.senders.map { s -> s.senderId },
+                            )
                         }
                     }
                 }

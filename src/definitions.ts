@@ -76,6 +76,14 @@ export interface RoomMember {
   membership: 'join' | 'invite' | 'leave' | 'ban';
 }
 
+// User Discovery
+
+export interface UserProfile {
+  userId: string;
+  displayName?: string;
+  avatarUrl?: string;
+}
+
 // Encryption
 
 export interface CrossSigningStatus {
@@ -186,6 +194,12 @@ export interface MatrixPlugin {
 
   // Media
   getMediaUrl(options: { mxcUrl: string }): Promise<{ httpUrl: string }>;
+
+  // User Discovery
+  searchUsers(options: {
+    searchTerm: string;
+    limit?: number;
+  }): Promise<{ results: UserProfile[]; limited: boolean }>;
 
   // Presence
   setPresence(options: {

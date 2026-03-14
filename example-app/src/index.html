@@ -2,286 +2,1028 @@
 <html lang="en" dir="ltr">
   <head>
     <meta charset="UTF-8" />
-    <title>Matrix Plugin Test</title>
+    <title>Matrix Chat</title>
     <meta
       name="viewport"
       content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
     <meta name="format-detection" content="telephone=no" />
+    <meta name="theme-color" content="#12121a" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <style>
+      :root {
+        --bg-deep: #0c0c14;
+        --bg-sidebar: #12121a;
+        --bg-sidebar-hover: #1c1c2a;
+        --bg-sidebar-active: #252538;
+        --bg-chat: #fafafa;
+        --bg-surface: #ffffff;
+        --bg-compose: #ffffff;
+        --text-primary: #1a1a2e;
+        --text-secondary: #6b6b80;
+        --text-muted: #9e9eb0;
+        --text-inverse: #e8e8f0;
+        --text-inverse-muted: #8888a0;
+        --accent: #6366f1;
+        --accent-hover: #5558e6;
+        --accent-soft: #eef0ff;
+        --green: #22c55e;
+        --orange: #f59e0b;
+        --red: #ef4444;
+        --border: #e5e5ec;
+        --border-light: #f0f0f4;
+        --bubble-mine: #6366f1;
+        --bubble-mine-text: #ffffff;
+        --bubble-other: #ffffff;
+        --bubble-other-text: #1a1a2e;
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 16px;
+        --radius-xl: 20px;
+        --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+        --shadow-md: 0 4px 12px rgba(0,0,0,0.06);
+        --shadow-lg: 0 8px 30px rgba(0,0,0,0.1);
+        --sidebar-width: 320px;
+        --debug-width: 380px;
+        --safe-top: env(safe-area-inset-top, 0px);
+        --safe-bottom: env(safe-area-inset-bottom, 0px);
+        --safe-left: env(safe-area-inset-left, 0px);
+        --safe-right: env(safe-area-inset-right, 0px);
+      }
+
       * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; overflow: hidden; }
       body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        background: #f5f5f5;
-        color: #333;
-        padding: 16px;
-        padding-top: max(16px, env(safe-area-inset-top));
-        padding-bottom: max(16px, env(safe-area-inset-bottom));
-        padding-left: max(16px, env(safe-area-inset-left));
-        padding-right: max(16px, env(safe-area-inset-right));
+        font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: var(--bg-deep);
+        color: var(--text-primary);
         -webkit-tap-highlight-color: transparent;
         -webkit-text-size-adjust: 100%;
+        -webkit-font-smoothing: antialiased;
       }
-      h1 { font-size: 20px; margin-bottom: 12px; }
-      h2 { font-size: 16px; margin: 16px 0 8px; color: #555; }
-      .card {
-        background: #fff;
-        border-radius: 8px;
-        padding: 12px;
-        margin-bottom: 12px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+
+      /* ─── LOGIN SCREEN ─── */
+      #loginScreen {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg-deep);
+        z-index: 100;
+        padding: 24px;
+        transition: opacity 0.4s, visibility 0.4s;
       }
-      label { display: block; font-size: 12px; color: #777; margin-bottom: 2px; }
-      input, select {
+      #loginScreen.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+
+      .login-card {
         width: 100%;
-        padding: 8px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        font-size: 14px;
-        margin-bottom: 8px;
+        max-width: 400px;
+        background: var(--bg-sidebar);
+        border-radius: var(--radius-xl);
+        padding: 40px 32px 32px;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        animation: loginSlideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
       }
-      button {
-        padding: 10px 16px;
-        border: none;
-        border-radius: 4px;
-        font-size: 14px;
-        cursor: pointer;
-        margin-right: 4px;
+      @keyframes loginSlideUp {
+        from { opacity: 0; transform: translateY(24px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .login-logo {
+        width: 48px; height: 48px;
+        background: var(--accent);
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 24px;
+        font-size: 22px;
+        color: white;
+        font-weight: 700;
+      }
+      .login-card h1 {
+        font-size: 24px;
+        font-weight: 600;
+        color: var(--text-inverse);
         margin-bottom: 4px;
-        min-height: 44px;
+        letter-spacing: -0.3px;
+      }
+      .login-card .login-subtitle {
+        font-size: 14px;
+        color: var(--text-inverse-muted);
+        margin-bottom: 28px;
+      }
+      .login-card label {
+        display: block;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-inverse-muted);
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .login-card input {
+        width: 100%;
+        padding: 12px 14px;
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: var(--radius-md);
+        font-size: 14px;
+        font-family: inherit;
+        color: var(--text-inverse);
+        margin-bottom: 16px;
+        transition: border-color 0.2s, background 0.2s;
+        outline: none;
+      }
+      .login-card input::placeholder { color: rgba(255,255,255,0.2); }
+      .login-card input:focus {
+        border-color: var(--accent);
+        background: rgba(99,102,241,0.06);
+      }
+
+      .login-btn {
+        width: 100%;
+        padding: 13px;
+        background: var(--accent);
+        color: white;
+        border: none;
+        border-radius: var(--radius-md);
+        font-size: 15px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.2s, transform 0.1s;
+        margin-top: 4px;
+      }
+      .login-btn:hover { background: var(--accent-hover); }
+      .login-btn:active { transform: scale(0.98); }
+      .login-btn:disabled { opacity: 0.5; cursor: default; }
+
+      .login-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        margin-top: 16px;
+        font-size: 13px;
+        color: var(--text-inverse-muted);
+      }
+      .login-toggle button {
+        background: none;
+        border: none;
+        color: var(--accent);
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        padding: 0;
+      }
+      .login-toggle button:hover { text-decoration: underline; }
+
+      /* ─── MAIN APP SHELL ─── */
+      #appShell {
+        display: none;
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+      }
+      #appShell.active { display: flex; }
+
+      /* ─── SIDEBAR ─── */
+      .sidebar {
+        width: var(--sidebar-width);
+        min-width: var(--sidebar-width);
+        background: var(--bg-sidebar);
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid rgba(255,255,255,0.04);
+        padding-top: var(--safe-top);
+        padding-left: var(--safe-left);
+      }
+
+      .sidebar-header {
+        display: flex;
+        align-items: center;
+        padding: 20px 20px 16px;
+        gap: 12px;
+      }
+      .sidebar-header h2 {
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--text-inverse);
+        flex: 1;
+        letter-spacing: -0.2px;
+      }
+      .sidebar-header .status-indicator {
+        width: 9px; height: 9px;
+        border-radius: 50%;
+        background: var(--text-inverse-muted);
+        flex-shrink: 0;
+        transition: background 0.3s;
+      }
+      .sidebar-header .status-indicator.connected { background: var(--green); }
+      .sidebar-header .status-indicator.syncing { background: var(--orange); animation: statusPulse 1.5s ease infinite; }
+      .sidebar-header .status-indicator.error { background: var(--red); }
+      @keyframes statusPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+      .sidebar-icon-btn {
+        width: 36px; height: 36px;
+        border-radius: var(--radius-sm);
+        border: none;
+        background: transparent;
+        color: var(--text-inverse-muted);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        transition: background 0.15s, color 0.15s;
+        flex-shrink: 0;
+      }
+      .sidebar-icon-btn:hover { background: var(--bg-sidebar-hover); color: var(--text-inverse); }
+
+      .room-list {
+        flex: 1;
+        overflow-y: auto;
+        list-style: none;
+        padding: 0 8px;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255,255,255,0.1) transparent;
+      }
+      .room-list::-webkit-scrollbar { width: 4px; }
+      .room-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
+      .room-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        transition: background 0.15s;
+        margin-bottom: 2px;
         touch-action: manipulation;
       }
-      .btn-primary { background: #4CAF50; color: white; }
-      .btn-secondary { background: #2196F3; color: white; }
-      .btn-danger { background: #f44336; color: white; }
-      .btn-small { padding: 6px 10px; font-size: 12px; min-height: 36px; }
-      button:active { opacity: 0.7; transform: scale(0.97); }
-      input, select { min-height: 44px; touch-action: manipulation; }
-      #log {
-        background: #1e1e1e;
-        color: #d4d4d4;
-        font-family: 'SF Mono', 'Menlo', monospace;
+      .room-item:hover { background: var(--bg-sidebar-hover); }
+      .room-item.active { background: var(--bg-sidebar-active); }
+
+      .room-avatar {
+        width: 42px; height: 42px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        font-weight: 600;
+        color: white;
+        flex-shrink: 0;
+        text-transform: uppercase;
+      }
+      .room-item-info { flex: 1; min-width: 0; }
+      .room-item-name {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--text-inverse);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .room-item-preview {
+        font-size: 12px;
+        color: var(--text-inverse-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-top: 2px;
+      }
+      .room-item-meta {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+      .room-item-time {
         font-size: 11px;
-        padding: 8px;
-        border-radius: 4px;
-        max-height: 300px;
+        color: var(--text-inverse-muted);
+      }
+      .room-unread-badge {
+        min-width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: var(--accent);
+        color: white;
+        font-size: 11px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 6px;
+      }
+      .room-encrypted-icon {
+        font-size: 11px;
+        margin-left: 4px;
+        opacity: 0.5;
+      }
+
+      .sidebar-footer {
+        padding: 12px 16px;
+        padding-bottom: max(12px, var(--safe-bottom));
+        border-top: 1px solid rgba(255,255,255,0.04);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .sidebar-footer .user-avatar {
+        width: 32px; height: 32px;
+        border-radius: 8px;
+        background: var(--accent);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 600;
+        color: white;
+      }
+      .sidebar-footer .user-name {
+        flex: 1;
+        font-size: 13px;
+        color: var(--text-inverse);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* ─── CHAT AREA ─── */
+      .chat-area {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg-chat);
+        min-width: 0;
+        overflow: hidden;
+        padding-top: var(--safe-top);
+      }
+      #chatView {
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+      }
+      #chatView:not(.hidden) {
+        display: flex !important;
+      }
+
+      .chat-empty {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-muted);
+        gap: 12px;
+      }
+      .chat-empty-icon {
+        width: 64px; height: 64px;
+        border-radius: 20px;
+        background: var(--border-light);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+      }
+      .chat-empty h3 { font-size: 16px; font-weight: 500; color: var(--text-secondary); }
+      .chat-empty p { font-size: 13px; }
+
+      .chat-header {
+        display: flex;
+        align-items: center;
+        padding: 12px 20px;
+        gap: 12px;
+        background: var(--bg-surface);
+        border-bottom: 1px solid var(--border-light);
+        min-height: 60px;
+      }
+      .chat-back-btn {
+        display: none;
+        width: 36px; height: 36px;
+        border-radius: var(--radius-sm);
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        flex-shrink: 0;
+      }
+      .chat-header-info { flex: 1; min-width: 0; }
+      .chat-header-name {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-primary);
+        letter-spacing: -0.1px;
+      }
+      .chat-header-detail {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-top: 1px;
+      }
+      .chat-header-actions {
+        display: flex;
+        gap: 4px;
+      }
+      .chat-header-btn {
+        width: 36px; height: 36px;
+        border-radius: var(--radius-sm);
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        transition: background 0.15s;
+      }
+      .chat-header-btn:hover { background: var(--border-light); }
+
+      .chat-messages {
+        flex: 1;
+        min-height: 0;
         overflow-y: auto;
+        padding: 16px 20px;
+        scroll-behavior: smooth;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(0,0,0,0.1) transparent;
+      }
+      .chat-messages::-webkit-scrollbar { width: 4px; }
+      .chat-messages::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.1); border-radius: 4px; }
+
+      .msg-group {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 16px;
+        max-width: 75%;
+        animation: msgFadeIn 0.25s ease;
+      }
+      .msg-group.mine {
+        margin-left: auto;
+        flex-direction: row-reverse;
+      }
+      @keyframes msgFadeIn {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .msg-avatar {
+        width: 32px; height: 32px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+        color: white;
+        flex-shrink: 0;
+        align-self: flex-end;
+      }
+      .msg-group.mine .msg-avatar { display: none; }
+
+      .msg-content-wrap { min-width: 0; }
+      .msg-sender-name {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+        padding-left: 2px;
+      }
+      .msg-group.mine .msg-sender-name { display: none; }
+
+      .msg-bubble {
+        padding: 10px 14px;
+        border-radius: var(--radius-lg);
+        font-size: 14px;
+        line-height: 1.45;
+        word-wrap: break-word;
+        position: relative;
+      }
+      .msg-group.mine .msg-bubble {
+        background: var(--bubble-mine);
+        color: var(--bubble-mine-text);
+        border-bottom-right-radius: 6px;
+      }
+      .msg-group.other .msg-bubble {
+        background: var(--bubble-other);
+        color: var(--bubble-other-text);
+        border-bottom-left-radius: 6px;
+        box-shadow: var(--shadow-sm);
+        border: 1px solid var(--border-light);
+      }
+
+      .msg-time {
+        font-size: 10px;
+        margin-top: 4px;
+        text-align: right;
+        opacity: 0.5;
+      }
+
+      .msg-actions-bar {
+        display: flex;
+        gap: 4px;
+        margin-top: 4px;
+        flex-wrap: wrap;
+      }
+      .msg-action-btn {
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 2px 8px;
+        font-size: 14px;
+        cursor: pointer;
+        transition: background 0.15s;
+        line-height: 1.4;
+      }
+      .msg-action-btn:hover { background: var(--border-light); }
+      .msg-group.mine .msg-action-btn { border-color: rgba(255,255,255,0.2); }
+      .msg-group.mine .msg-action-btn:hover { background: rgba(255,255,255,0.1); }
+
+      .msg-reactions-bar {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+        margin-top: 4px;
+      }
+      .reaction-chip {
+        font-size: 12px;
+        background: var(--accent-soft);
+        border-radius: 10px;
+        padding: 2px 7px;
+      }
+      .msg-group.mine .reaction-chip {
+        background: rgba(255,255,255,0.15);
+      }
+
+      .msg-system {
+        text-align: center;
+        font-size: 12px;
+        color: var(--text-muted);
+        margin: 12px 0;
+        padding: 4px 0;
+      }
+
+      .media-preview img {
+        max-width: min(240px, 65vw);
+        max-height: 240px;
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        display: block;
+      }
+      .media-preview audio, .media-preview video {
+        max-width: min(280px, 70vw);
+        border-radius: var(--radius-sm);
+      }
+      .media-preview a {
+        color: var(--accent);
+        font-size: 13px;
+        text-decoration: none;
+      }
+      .media-preview a:hover { text-decoration: underline; }
+
+      .typing-indicator {
+        font-size: 12px;
+        color: var(--text-muted);
+        padding: 0 20px 4px;
+        min-height: 20px;
+        font-style: italic;
+      }
+
+      .compose-bar {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        padding: 12px 20px;
+        padding-bottom: max(12px, var(--safe-bottom));
+        background: var(--bg-surface);
+        border-top: 1px solid var(--border-light);
+      }
+      .compose-bar input[type="text"] {
+        flex: 1;
+        min-width: 0;
+        padding: 11px 16px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-xl);
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+        background: var(--bg-chat);
+        color: var(--text-primary);
+        transition: border-color 0.2s;
+      }
+      .compose-bar input[type="text"]::placeholder { color: var(--text-muted); }
+      .compose-bar input[type="text"]:focus { border-color: var(--accent); }
+
+      .compose-attach-btn {
+        width: 40px; height: 40px;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        border-radius: 50%;
+        transition: background 0.15s;
+        flex-shrink: 0;
+      }
+      .compose-attach-btn:hover { background: var(--border-light); }
+
+      .compose-send-btn {
+        width: 40px; height: 40px;
+        border: none;
+        background: var(--accent);
+        color: white;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        border-radius: 50%;
+        transition: background 0.15s, transform 0.1s;
+        flex-shrink: 0;
+      }
+      .compose-send-btn:hover { background: var(--accent-hover); }
+      .compose-send-btn:active { transform: scale(0.92); }
+
+      /* ─── ROOM SETTINGS DRAWER ─── */
+      .room-drawer-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.4);
+        z-index: 50;
+      }
+      .room-drawer-overlay.active { display: block; }
+
+      .room-drawer {
+        position: fixed;
+        top: 0; right: 0; bottom: 0;
+        width: min(360px, 85vw);
+        background: var(--bg-surface);
+        z-index: 51;
+        transform: translateX(100%);
+        transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        display: flex;
+        flex-direction: column;
+        box-shadow: -8px 0 30px rgba(0,0,0,0.1);
+        padding-top: var(--safe-top);
+        padding-right: var(--safe-right);
+      }
+      .room-drawer.active { transform: translateX(0); }
+
+      .drawer-header {
+        display: flex;
+        align-items: center;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border-light);
+        gap: 12px;
+      }
+      .drawer-header h3 {
+        flex: 1;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      .drawer-close {
+        width: 32px; height: 32px;
+        border: none;
+        background: var(--border-light);
+        border-radius: 8px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        color: var(--text-secondary);
+      }
+
+      .drawer-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px 20px;
+      }
+      .drawer-section {
+        margin-bottom: 20px;
+      }
+      .drawer-section-title {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: var(--text-muted);
+        margin-bottom: 10px;
+      }
+      .drawer-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+        align-items: center;
+      }
+      .drawer-row input {
+        flex: 1;
+        min-width: 0;
+        padding: 9px 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        font-size: 13px;
+        font-family: inherit;
+        outline: none;
+        color: var(--text-primary);
+      }
+      .drawer-row input:focus { border-color: var(--accent); }
+      .drawer-btn {
+        padding: 8px 14px;
+        border: none;
+        border-radius: var(--radius-sm);
+        font-size: 13px;
+        font-family: inherit;
+        font-weight: 500;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background 0.15s;
+      }
+      .drawer-btn-primary { background: var(--accent); color: white; }
+      .drawer-btn-primary:hover { background: var(--accent-hover); }
+      .drawer-btn-secondary { background: var(--border-light); color: var(--text-primary); }
+      .drawer-btn-secondary:hover { background: var(--border); }
+      .drawer-btn-danger { background: var(--red); color: white; }
+      .drawer-btn-danger:hover { background: #dc2626; }
+
+      /* ─── DEBUG PANEL ─── */
+      .debug-panel {
+        width: 0;
+        min-width: 0;
+        background: var(--bg-deep);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        border-left: 1px solid rgba(255,255,255,0.04);
+        padding-top: var(--safe-top);
+        padding-right: var(--safe-right);
+      }
+      .debug-panel.active {
+        width: var(--debug-width);
+        min-width: var(--debug-width);
+      }
+
+      .debug-header {
+        display: flex;
+        align-items: center;
+        padding: 16px;
+        gap: 8px;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+        flex-shrink: 0;
+      }
+      .debug-header h3 {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-inverse);
+        flex: 1;
+        font-family: 'JetBrains Mono', monospace;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+      .debug-header-btn {
+        width: 28px; height: 28px;
+        border: none;
+        background: rgba(255,255,255,0.06);
+        border-radius: 6px;
+        color: var(--text-inverse-muted);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+      }
+      .debug-header-btn:hover { background: rgba(255,255,255,0.1); color: var(--text-inverse); }
+
+      .debug-tabs {
+        display: flex;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+        flex-shrink: 0;
+      }
+      .debug-tab {
+        flex: 1;
+        padding: 10px 8px;
+        border: none;
+        background: none;
+        color: var(--text-inverse-muted);
+        font-size: 11px;
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 500;
+        cursor: pointer;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 2px solid transparent;
+        transition: color 0.15s;
+      }
+      .debug-tab:hover { color: var(--text-inverse); }
+      .debug-tab.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+
+      .debug-tab-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+        display: none;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255,255,255,0.08) transparent;
+      }
+      .debug-tab-content::-webkit-scrollbar { width: 4px; }
+      .debug-tab-content::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+      .debug-tab-content.active { display: block; }
+
+      #debugLog {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        line-height: 1.6;
+        color: #b0b0c0;
         white-space: pre-wrap;
         word-break: break-all;
       }
-      #log .error { color: #f44336; }
-      #log .success { color: #4CAF50; }
-      #log .event { color: #FF9800; }
-      .status-bar {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        margin-bottom: 8px;
-        font-size: 13px;
+      #debugLog .error { color: #f87171; }
+      #debugLog .success { color: #4ade80; }
+      #debugLog .event { color: #fbbf24; }
+
+      .debug-section {
+        margin-bottom: 16px;
       }
-      .status-dot {
-        width: 8px; height: 8px;
-        border-radius: 50%;
-        background: #999;
-      }
-      .status-dot.connected { background: #4CAF50; }
-      .status-dot.syncing { background: #FF9800; }
-      .status-dot.error { background: #f44336; }
-      .room-list { list-style: none; }
-      .room-list li {
-        padding: 12px 8px;
-        border-bottom: 1px solid #eee;
-        cursor: pointer;
-        font-size: 14px;
-        min-height: 44px;
-        touch-action: manipulation;
-      }
-      .room-list li:active { background: #f0f0f0; }
-      @media (hover: hover) { .room-list li:hover { background: #f0f0f0; } }
-      .room-list li .room-name { font-weight: 600; }
-      .room-list li .room-meta { font-size: 11px; color: #999; }
-      .room-list li.selected { background: #e3f2fd; border-left: 3px solid #2196F3; }
-      .hidden { display: none; }
-      .flex-row { display: flex; gap: 4px; flex-wrap: wrap; }
-      .flex-row input { flex: 1; min-width: 0; }
-      /* Conversation view */
-      #conversation {
-        display: flex;
-        flex-direction: column;
-        height: min(50vh, 400px);
-        border: 1px solid #eee;
-        border-radius: 4px;
-        margin: 8px 0;
-        background: #fafafa;
-      }
-      #messageList {
-        flex: 1;
-        overflow-y: auto;
-        padding: 8px;
-      }
-      .msg-bubble {
-        max-width: 80%;
-        padding: 6px 10px;
-        border-radius: 12px;
-        margin-bottom: 4px;
-        font-size: 13px;
-        line-height: 1.4;
-        word-wrap: break-word;
-      }
-      .msg-bubble.mine {
-        background: #dcf8c6;
-        margin-left: auto;
-        border-bottom-right-radius: 4px;
-      }
-      .msg-bubble.other {
-        background: #fff;
-        border: 1px solid #e0e0e0;
-        margin-right: auto;
-        border-bottom-left-radius: 4px;
-      }
-      .msg-bubble .msg-sender {
-        font-size: 11px;
+      .debug-section-title {
+        font-size: 10px;
         font-weight: 600;
-        color: #1976D2;
-        margin-bottom: 2px;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: var(--text-inverse-muted);
+        margin-bottom: 8px;
+        font-family: 'JetBrains Mono', monospace;
       }
-      .msg-bubble .msg-time {
-        font-size: 10px;
-        color: #999;
-        text-align: right;
-        margin-top: 2px;
-      }
-      .msg-bubble .msg-type {
-        font-size: 10px;
-        color: #999;
-        font-style: italic;
-      }
-      .msg-system {
-        text-align: center;
-        font-size: 11px;
-        color: #999;
-        margin: 4px 0;
-      }
-      .msg-actions {
+      .debug-btn-row {
         display: flex;
-        gap: 2px;
-        margin-top: 2px;
-      }
-      .msg-actions button {
-        background: none;
-        border: 1px solid #ddd;
-        border-radius: 10px;
-        padding: 4px 10px;
-        font-size: 13px;
-        cursor: pointer;
-        margin: 0;
-        min-height: 28px;
-        touch-action: manipulation;
-      }
-      .msg-actions button:active { background: #f0f0f0; }
-      .msg-reactions {
-        display: flex;
-        gap: 2px;
+        gap: 6px;
         flex-wrap: wrap;
-        margin-top: 2px;
+        margin-bottom: 8px;
       }
-      .msg-reactions .reaction-chip {
-        font-size: 13px;
-        background: #e3f2fd;
-        border-radius: 10px;
-        padding: 4px 8px;
-        cursor: default;
-      }
-      #typingIndicator {
+      .debug-btn {
+        padding: 6px 12px;
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: var(--radius-sm);
+        background: rgba(255,255,255,0.04);
+        color: var(--text-inverse-muted);
         font-size: 11px;
-        color: #999;
-        padding: 2px 8px;
-        min-height: 16px;
-        font-style: italic;
-      }
-      .media-preview img {
-        max-width: min(200px, 60vw);
-        max-height: 200px;
-        border-radius: 4px;
+        font-family: 'JetBrains Mono', monospace;
         cursor: pointer;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+        white-space: nowrap;
       }
-      .media-preview audio, .media-preview video {
-        max-width: min(250px, 70vw);
-      }
-      .media-preview a {
-        color: #2196F3;
+      .debug-btn:hover { background: rgba(255,255,255,0.08); color: var(--text-inverse); border-color: rgba(255,255,255,0.15); }
+      .debug-btn.accent { border-color: var(--accent); color: var(--accent); }
+      .debug-btn.accent:hover { background: rgba(99,102,241,0.15); }
+      .debug-btn.danger { border-color: var(--red); color: var(--red); }
+      .debug-btn.danger:hover { background: rgba(239,68,68,0.15); }
+
+      .debug-input {
+        width: 100%;
+        padding: 8px 10px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: var(--radius-sm);
         font-size: 12px;
+        font-family: 'JetBrains Mono', monospace;
+        color: var(--text-inverse);
+        outline: none;
+        margin-bottom: 8px;
       }
-      #composeBar {
-        display: flex;
-        gap: 4px;
-        padding: 8px;
-        border-top: 1px solid #eee;
-        background: #fff;
-        align-items: center;
-      }
-      #composeBar input { margin-bottom: 0; flex: 1; min-width: 0; }
-      .room-header {
+      .debug-input::placeholder { color: rgba(255,255,255,0.2); }
+      .debug-input:focus { border-color: var(--accent); }
+
+      .debug-checkbox {
         display: flex;
         align-items: center;
         gap: 8px;
-        padding-bottom: 4px;
-        border-bottom: 1px solid #eee;
-        margin-bottom: 4px;
+        font-size: 12px;
+        color: var(--text-inverse-muted);
+        margin-bottom: 8px;
+        font-family: 'JetBrains Mono', monospace;
       }
-      .room-header .room-badge {
-        font-size: 10px;
-        padding: 2px 6px;
-        border-radius: 8px;
-        background: #e8f5e9;
-        color: #388E3C;
-      }
-      .room-header .room-badge.encrypted {
-        background: #e8f5e9;
-        color: #388E3C;
-      }
-      /* Modal overlay */
+      .debug-checkbox input { width: auto; margin: 0; }
+
+      /* ─── MODAL ─── */
       .modal-overlay {
         display: none;
         position: fixed;
         inset: 0;
         background: rgba(0,0,0,0.5);
-        z-index: 1000;
+        z-index: 200;
         align-items: center;
         justify-content: center;
-        padding: 16px;
+        padding: 24px;
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
       }
       .modal-overlay.active { display: flex; }
       .modal {
-        background: #fff;
-        border-radius: 12px;
-        padding: 24px;
-        max-width: 400px;
+        background: var(--bg-surface);
+        border-radius: var(--radius-xl);
+        padding: 32px;
+        max-width: 420px;
         width: 100%;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+        box-shadow: var(--shadow-lg);
+        animation: modalIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
       }
-      .modal h2 { margin-bottom: 8px; font-size: 18px; }
-      .modal p { font-size: 13px; color: #555; margin-bottom: 12px; line-height: 1.5; }
-      .modal label { font-size: 13px; font-weight: 600; }
-      .modal input { margin-bottom: 12px; }
-      .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+      @keyframes modalIn {
+        from { opacity: 0; transform: scale(0.95) translateY(8px); }
+        to { opacity: 1; transform: scale(1) translateY(0); }
+      }
+      .modal h2 {
+        font-size: 18px;
+        font-weight: 600;
+        margin-bottom: 8px;
+        letter-spacing: -0.2px;
+      }
+      .modal p {
+        font-size: 14px;
+        color: var(--text-secondary);
+        margin-bottom: 16px;
+        line-height: 1.5;
+      }
+      .modal label {
+        display: block;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+      }
+      .modal input {
+        width: 100%;
+        padding: 11px 14px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+        color: var(--text-primary);
+        margin-bottom: 14px;
+        transition: border-color 0.2s;
+      }
+      .modal input:focus { border-color: var(--accent); }
+      .modal .btn-row {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 20px;
+      }
+      .modal .modal-btn {
+        padding: 10px 20px;
+        border: none;
+        border-radius: var(--radius-md);
+        font-size: 14px;
+        font-weight: 500;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .modal .modal-btn-primary { background: var(--accent); color: white; }
+      .modal .modal-btn-primary:hover { background: var(--accent-hover); }
+      .modal .modal-btn-secondary { background: var(--border-light); color: var(--text-primary); }
+      .modal .modal-btn-secondary:hover { background: var(--border); }
+      .modal .modal-btn-danger { background: var(--red); color: white; }
+      .modal .modal-btn-danger:hover { background: #dc2626; }
+      .modal .modal-btn:disabled { opacity: 0.5; cursor: default; }
+
       .modal .recovery-key-display {
-        background: #f5f5f5;
-        border: 1px dashed #ccc;
-        border-radius: 6px;
-        padding: 12px;
-        font-family: 'SF Mono', 'Menlo', monospace;
+        background: var(--bg-chat);
+        border: 1px dashed var(--border);
+        border-radius: var(--radius-md);
+        padding: 14px;
+        font-family: 'JetBrains Mono', monospace;
         font-size: 13px;
         word-break: break-all;
-        margin: 8px 0 12px;
+        margin: 10px 0 16px;
         user-select: all;
         cursor: text;
+        color: var(--text-primary);
       }
-      .modal .step { margin-bottom: 16px; }
+      .modal .step {
+        margin-bottom: 16px;
+      }
       .modal .step-num {
         display: inline-block;
         width: 22px; height: 22px;
-        background: #2196F3;
+        background: var(--accent);
         color: #fff;
         border-radius: 50%;
         text-align: center;
@@ -290,11 +1032,11 @@
         font-weight: 700;
         margin-right: 6px;
       }
-      .modal .spinner {
+      .spinner {
         display: inline-block;
         width: 16px; height: 16px;
-        border: 2px solid #ddd;
-        border-top-color: #2196F3;
+        border: 2px solid var(--border);
+        border-top-color: var(--accent);
         border-radius: 50%;
         animation: spin 0.6s linear infinite;
         vertical-align: middle;
@@ -302,180 +1044,471 @@
       }
       @keyframes spin { to { transform: rotate(360deg); } }
 
-      /* Keyboard-aware: shrink conversation when keyboard is visible */
-      @media (max-height: 500px) {
-        #conversation { height: 30vh; }
-        body { padding: 8px; padding-top: max(8px, env(safe-area-inset-top)); }
+      /* ─── MOBILE DEBUG BOTTOM SHEET ─── */
+      .debug-sheet-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.4);
+        z-index: 60;
+      }
+      .debug-sheet-overlay.active { display: block; }
+
+      .debug-sheet {
+        display: none;
+        position: fixed;
+        bottom: 0; left: 0; right: 0;
+        height: 70vh;
+        background: var(--bg-deep);
+        border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+        z-index: 61;
+        flex-direction: column;
+        transform: translateY(100%);
+        transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        padding-bottom: var(--safe-bottom);
+      }
+      .debug-sheet.active {
+        display: flex;
+        transform: translateY(0);
+      }
+      .debug-sheet-handle {
+        width: 36px; height: 4px;
+        background: rgba(255,255,255,0.2);
+        border-radius: 2px;
+        margin: 10px auto 6px;
+        flex-shrink: 0;
       }
 
-      /* Narrow devices */
-      @media (max-width: 360px) {
-        body { padding: 8px; }
-        .card { padding: 8px; }
-        h1 { font-size: 18px; }
-        .modal { padding: 16px; }
+      /* ─── MOBILE RESPONSIVE ─── */
+      @media (max-width: 768px) {
+        :root {
+          --sidebar-width: 100%;
+        }
+        .sidebar {
+          position: fixed;
+          inset: 0;
+          width: 100%;
+          z-index: 30;
+          transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .sidebar.room-open { transform: translateX(-100%); }
+        .chat-area {
+          position: fixed;
+          inset: 0;
+          z-index: 31;
+          transform: translateX(100%);
+          transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .chat-area.room-open { transform: translateX(0); }
+        .chat-back-btn { display: flex; }
+        .debug-panel { display: none; }
+        .msg-group { max-width: 85%; }
       }
+      @media (min-width: 769px) {
+        .debug-sheet, .debug-sheet-overlay { display: none !important; }
+      }
+
+      /* ─── USER SEARCH ─── */
+      .user-search-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+      .user-search-item:hover { background: var(--border-light); }
+      .user-search-avatar {
+        width: 32px; height: 32px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+        color: white;
+        flex-shrink: 0;
+      }
+      .user-search-info { min-width: 0; }
+      .user-search-name { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+      .user-search-id { font-size: 11px; color: var(--text-muted); }
+      .user-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        background: var(--accent-soft);
+        border-radius: 14px;
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 500;
+      }
+      .user-chip button {
+        background: none;
+        border: none;
+        color: var(--accent);
+        font-size: 14px;
+        cursor: pointer;
+        padding: 0;
+        line-height: 1;
+        opacity: 0.6;
+      }
+      .user-chip button:hover { opacity: 1; }
+
+      /* ─── UTILITIES ─── */
+      .hidden { display: none !important; }
     </style>
   </head>
   <body>
-    <h1>Matrix Plugin Test</h1>
+    <!-- ═══ LOGIN ═══ -->
+    <div id="loginScreen">
+      <div class="login-card">
+        <div class="login-logo">M</div>
+        <h1>Matrix Chat</h1>
+        <p class="login-subtitle">Sign in to your homeserver</p>
 
-    <!-- Status -->
-    <div class="card">
-      <div class="status-bar">
-        <div class="status-dot" id="statusDot"></div>
-        <span id="statusText">Not connected</span>
-        <span style="flex:1"></span>
+        <label>Homeserver</label>
+        <input type="url" id="homeserverUrl" placeholder="https://matrix.example.com" />
+
+        <label>User ID</label>
+        <input type="text" id="userId" placeholder="@user:example.com" />
+
+        <div id="passwordAuth">
+          <label>Password</label>
+          <input type="password" id="password" placeholder="Password" />
+          <button class="login-btn" onclick="doLogin()">Sign In</button>
+        </div>
+
+        <div id="tokenAuth" class="hidden">
+          <label>Access Token</label>
+          <input type="text" id="accessToken" placeholder="Access token" />
+          <label>Device ID</label>
+          <input type="text" id="deviceId" placeholder="Device ID" />
+          <button class="login-btn" onclick="doLoginWithToken()">Sign In with Token</button>
+        </div>
+
+        <div class="login-toggle">
+          <button onclick="toggleAuthMode()" id="authToggleBtn">Use access token instead</button>
+        </div>
       </div>
     </div>
 
-    <!-- Auth Section -->
-    <div class="card" id="authSection">
-      <h2>Authentication</h2>
-      <label>Homeserver URL</label>
-      <input type="url" id="homeserverUrl" placeholder="https://matrix.example.com" />
-      <label>User ID</label>
-      <input type="text" id="userId" placeholder="@user:example.com" />
-
-      <div id="passwordAuth">
-        <label>Password</label>
-        <input type="password" id="password" placeholder="Password" />
-        <button class="btn-primary" onclick="doLogin()">Login</button>
-      </div>
-
-      <div id="tokenAuth" class="hidden">
-        <label>Access Token</label>
-        <input type="text" id="accessToken" placeholder="Access token" />
-        <label>Device ID</label>
-        <input type="text" id="deviceId" placeholder="Device ID" />
-        <button class="btn-primary" onclick="doLoginWithToken()">Login with Token</button>
-      </div>
-
-      <button class="btn-small btn-secondary" onclick="toggleAuthMode()">Switch to Token Auth</button>
-      <button class="btn-small btn-secondary" onclick="doGetSession()">Check Session</button>
-      <button class="btn-small btn-danger" onclick="doLogout()">Logout</button>
-      <button class="btn-small btn-danger" onclick="doClearAllData()">Wipe All Data</button>
-    </div>
-
-    <!-- Sync Section -->
-    <div class="card">
-      <h2>Sync</h2>
-      <button class="btn-primary" onclick="doStartSync()">Start Sync</button>
-      <button class="btn-danger" onclick="doStopSync()">Stop Sync</button>
-      <button class="btn-secondary" onclick="doGetSyncState()">Get State</button>
-    </div>
-
-    <!-- Encryption Section -->
-    <div class="card">
-      <h2>Encryption (E2EE)</h2>
-      <button class="btn-primary" onclick="doInitCrypto()">Init Crypto</button>
-      <button class="btn-secondary" onclick="doGetEncryptionStatus()">Status</button>
-      <button class="btn-primary" onclick="doBootstrapCrossSigning()">Bootstrap Cross-Signing</button>
-      <hr style="margin:8px 0;border-color:#eee">
-      <button class="btn-primary" onclick="doSetupKeyBackup()">Setup Key Backup</button>
-      <button class="btn-secondary" onclick="doGetKeyBackupStatus()">Backup Status</button>
-      <hr style="margin:8px 0;border-color:#eee">
-      <div class="flex-row" style="margin-bottom:8px">
-        <input type="text" id="passphraseInput" placeholder="Passphrase (optional)..." />
-      </div>
-      <button class="btn-primary" onclick="doSetupRecovery()">Setup Recovery</button>
-      <button class="btn-secondary" onclick="doIsRecoveryEnabled()">Recovery Enabled?</button>
-      <div class="flex-row" style="margin-top:8px">
-        <input type="text" id="recoveryKeyInput" placeholder="Recovery key..." />
-        <button class="btn-primary btn-small" onclick="doRecoverAndSetup()">Recover</button>
-        <button class="btn-danger btn-small" onclick="doResetRecoveryKey()">Reset</button>
-      </div>
-    </div>
-
-    <!-- Create Room Section -->
-    <div class="card">
-      <h2>Create Room</h2>
-      <label>Room Name</label>
-      <input type="text" id="createRoomName" placeholder="My Room" />
-      <label>Topic (optional)</label>
-      <input type="text" id="createRoomTopic" placeholder="Room topic" />
-      <label>Invite Users (optional, comma-separated)</label>
-      <input type="text" id="createRoomInvite" placeholder="@user1:example.com, @user2:example.com" />
-      <label style="display:inline-flex;align-items:center;gap:4px;margin:8px 0">
-        <input type="checkbox" id="createRoomEncrypted" style="width:auto;margin:0" />
-        Enable encryption
-      </label>
-      <div>
-        <button class="btn-primary" onclick="doCreateRoom()">Create Room</button>
-      </div>
-    </div>
-
-    <!-- Rooms Section -->
-    <div class="card">
-      <h2>Rooms</h2>
-      <button class="btn-secondary" onclick="doGetRooms()">Refresh Rooms</button>
-      <div class="flex-row" style="margin-top:8px">
-        <input type="text" id="joinRoomInput" placeholder="Room ID or alias to join" />
-        <button class="btn-primary btn-small" onclick="doJoinRoom()">Join</button>
-      </div>
-      <ul class="room-list" id="roomList"></ul>
-    </div>
-
-    <!-- Room Detail Section -->
-    <div class="card hidden" id="roomDetail">
-      <div class="room-header">
-        <h2 style="flex:1">Room: <span id="roomDetailName"></span></h2>
-        <span class="room-badge hidden" id="roomEncBadge">E2EE</span>
-        <button class="btn-small btn-secondary" onclick="doGetRoomMembers()">Members</button>
-        <button class="btn-small btn-danger" onclick="doLeaveRoom()">Leave</button>
-      </div>
-      <p style="font-size:11px;color:#999;margin-bottom:4px" id="roomDetailId"></p>
-
-      <div id="conversation">
-        <div id="messageList"></div>
-        <div id="typingIndicator"></div>
-        <div id="composeBar">
-          <input type="text" id="messageInput" placeholder="Type a message..." onkeydown="if(event.key==='Enter')doSendMessage()" oninput="onComposeInput()" />
-          <label style="margin:0;cursor:pointer;display:flex;align-items:center" title="Attach file">
-            <input type="file" id="fileInput" style="display:none" onchange="doSendFile()" />
-            <span style="font-size:18px">&#128206;</span>
-          </label>
-          <button class="btn-primary btn-small" onclick="doSendMessage()">Send</button>
+    <!-- ═══ APP SHELL ═══ -->
+    <div id="appShell">
+      <!-- ─── Sidebar ─── -->
+      <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+          <div class="status-indicator" id="statusDot"></div>
+          <h2>Chats</h2>
+          <button class="sidebar-icon-btn" onclick="showCreateRoomModal()" title="New room">+</button>
+          <button class="sidebar-icon-btn" onclick="toggleDebugMobile()" title="Debug console" id="debugMobileBtn">&#9776;</button>
+          <button class="sidebar-icon-btn" onclick="toggleDebug()" title="Debug console" id="debugDesktopBtn">&lt;/&gt;</button>
+        </div>
+        <ul class="room-list" id="roomList"></ul>
+        <div class="sidebar-footer">
+          <div class="user-avatar" id="userAvatar"></div>
+          <span class="user-name" id="userName">Not signed in</span>
+          <button class="sidebar-icon-btn" onclick="showSettingsDrawer()" title="Settings" style="font-size:16px">&#9881;</button>
         </div>
       </div>
 
-      <!-- Room Management -->
-      <details style="margin-top:8px">
-        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#555">Room Management</summary>
-        <div style="margin-top:8px">
-          <div class="flex-row" style="margin-bottom:4px">
-            <input type="text" id="roomNameInput" placeholder="New room name" />
-            <button class="btn-small btn-secondary" onclick="doSetRoomName()">Set Name</button>
+      <!-- ─── Chat Area ─── -->
+      <div class="chat-area" id="chatArea">
+        <div class="chat-empty" id="chatEmpty">
+          <div class="chat-empty-icon">&#128172;</div>
+          <h3>Select a conversation</h3>
+          <p>Choose a room from the sidebar to start chatting</p>
+        </div>
+
+        <div class="hidden" id="chatView">
+          <div class="chat-header">
+            <button class="chat-back-btn" onclick="goBackToRooms()" id="chatBackBtn">&#8592;</button>
+            <div class="chat-header-info">
+              <div class="chat-header-name" id="chatRoomName"></div>
+              <div class="chat-header-detail" id="chatRoomDetail"></div>
+            </div>
+            <div class="chat-header-actions">
+              <button class="chat-header-btn" onclick="doGetRoomMembers()" title="Members">&#128101;</button>
+              <button class="chat-header-btn" onclick="openRoomDrawer()" title="Room settings">&#8943;</button>
+            </div>
           </div>
-          <div class="flex-row" style="margin-bottom:4px">
-            <input type="text" id="roomTopicInput" placeholder="New room topic" />
-            <button class="btn-small btn-secondary" onclick="doSetRoomTopic()">Set Topic</button>
-          </div>
-          <div class="flex-row" style="margin-bottom:4px">
-            <input type="text" id="userActionInput" placeholder="@user:server" />
-            <button class="btn-small btn-secondary" onclick="doInviteUser()">Invite</button>
-            <button class="btn-small btn-danger" onclick="doKickUser()">Kick</button>
-            <button class="btn-small btn-danger" onclick="doBanUser()">Ban</button>
-            <button class="btn-small btn-secondary" onclick="doUnbanUser()">Unban</button>
+          <div class="chat-messages" id="messageList"></div>
+          <div class="typing-indicator" id="typingIndicator"></div>
+          <div class="compose-bar">
+            <label class="compose-attach-btn" title="Attach file">
+              <input type="file" id="fileInput" style="display:none" onchange="doSendFile()" />
+              &#128206;
+            </label>
+            <input type="text" id="messageInput" placeholder="Message..." onkeydown="if(event.key==='Enter')doSendMessage()" oninput="onComposeInput()" />
+            <button class="compose-send-btn" onclick="doSendMessage()">&#10148;</button>
           </div>
         </div>
-      </details>
-    </div>
-
-    <!-- Log Output -->
-    <div class="card">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <h2 style="margin:0;flex:1">Log</h2>
-        <button class="btn-small btn-secondary" onclick="copyLog()">Copy</button>
-        <button class="btn-small btn-danger" onclick="clearLog()">Clear</button>
       </div>
-      <div id="log"></div>
+
+      <!-- ─── Debug Panel (desktop) ─── -->
+      <div class="debug-panel" id="debugPanel">
+        <div class="debug-header">
+          <h3>Console</h3>
+          <button class="debug-header-btn" onclick="copyLog()" title="Copy logs">&#128203;</button>
+          <button class="debug-header-btn" onclick="clearLog()" title="Clear logs">&#128465;</button>
+          <button class="debug-header-btn" onclick="toggleDebug()" title="Close">&times;</button>
+        </div>
+        <div class="debug-tabs">
+          <button class="debug-tab active" data-tab="log" onclick="switchDebugTab(this,'log')">Log</button>
+          <button class="debug-tab" data-tab="sync" onclick="switchDebugTab(this,'sync')">Sync</button>
+          <button class="debug-tab" data-tab="crypto" onclick="switchDebugTab(this,'crypto')">Crypto</button>
+          <button class="debug-tab" data-tab="rooms" onclick="switchDebugTab(this,'rooms')">Rooms</button>
+        </div>
+        <div class="debug-tab-content active" data-tab-content="log">
+          <div id="debugLog"></div>
+        </div>
+        <div class="debug-tab-content" data-tab-content="sync">
+          <div class="debug-section">
+            <div class="debug-section-title">Sync Controls</div>
+            <div class="debug-btn-row">
+              <button class="debug-btn accent" onclick="doStartSync()">Start</button>
+              <button class="debug-btn danger" onclick="doStopSync()">Stop</button>
+              <button class="debug-btn" onclick="doGetSyncState()">State</button>
+            </div>
+          </div>
+          <div class="debug-section">
+            <div class="debug-section-title">Session</div>
+            <div class="debug-btn-row">
+              <button class="debug-btn" onclick="doGetSession()">Check</button>
+              <button class="debug-btn danger" onclick="doLogout()">Logout</button>
+              <button class="debug-btn danger" onclick="doClearAllData()">Wipe Data</button>
+            </div>
+          </div>
+        </div>
+        <div class="debug-tab-content" data-tab-content="crypto">
+          <div class="debug-section">
+            <div class="debug-section-title">Encryption</div>
+            <div class="debug-btn-row">
+              <button class="debug-btn accent" onclick="doInitCrypto()">Init</button>
+              <button class="debug-btn" onclick="doGetEncryptionStatus()">Status</button>
+              <button class="debug-btn" onclick="doBootstrapCrossSigning()">Bootstrap CS</button>
+            </div>
+          </div>
+          <div class="debug-section">
+            <div class="debug-section-title">Key Backup</div>
+            <div class="debug-btn-row">
+              <button class="debug-btn accent" onclick="doSetupKeyBackup()">Setup</button>
+              <button class="debug-btn" onclick="doGetKeyBackupStatus()">Status</button>
+            </div>
+          </div>
+          <div class="debug-section">
+            <div class="debug-section-title">Recovery</div>
+            <input type="text" class="debug-input" id="passphraseInput" placeholder="Passphrase (optional)" />
+            <div class="debug-btn-row">
+              <button class="debug-btn accent" onclick="doSetupRecovery()">Setup</button>
+              <button class="debug-btn" onclick="doIsRecoveryEnabled()">Enabled?</button>
+            </div>
+            <input type="text" class="debug-input" id="recoveryKeyInput" placeholder="Recovery key" />
+            <div class="debug-btn-row">
+              <button class="debug-btn accent" onclick="doRecoverAndSetup()">Recover</button>
+              <button class="debug-btn danger" onclick="doResetRecoveryKey()">Reset Key</button>
+            </div>
+          </div>
+        </div>
+        <div class="debug-tab-content" data-tab-content="rooms">
+          <div class="debug-section">
+            <div class="debug-section-title">Create Room</div>
+            <input type="text" class="debug-input" id="createRoomName" placeholder="Room name" />
+            <input type="text" class="debug-input" id="createRoomTopic" placeholder="Topic (optional)" />
+            <input type="text" class="debug-input" id="createRoomInvite" placeholder="Invite: @a:srv, @b:srv" />
+            <div class="debug-checkbox">
+              <input type="checkbox" id="createRoomEncrypted" />
+              <span>Enable encryption</span>
+            </div>
+            <div class="debug-btn-row">
+              <button class="debug-btn accent" onclick="doCreateRoom()">Create</button>
+            </div>
+          </div>
+          <div class="debug-section">
+            <div class="debug-section-title">Join Room</div>
+            <input type="text" class="debug-input" id="joinRoomInput" placeholder="Room ID or alias" />
+            <div class="debug-btn-row">
+              <button class="debug-btn accent" onclick="doJoinRoom()">Join</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- Crypto Setup Modal -->
+    <!-- ═══ Room Settings Drawer ═══ -->
+    <div class="room-drawer-overlay" id="roomDrawerOverlay" onclick="closeRoomDrawer()"></div>
+    <div class="room-drawer" id="roomDrawer">
+      <div class="drawer-header">
+        <h3>Room Settings</h3>
+        <button class="drawer-close" onclick="closeRoomDrawer()">&times;</button>
+      </div>
+      <div class="drawer-content">
+        <div class="drawer-section">
+          <div class="drawer-section-title">Room Name</div>
+          <div class="drawer-row">
+            <input type="text" id="roomNameInput" placeholder="New name" />
+            <button class="drawer-btn drawer-btn-primary" onclick="doSetRoomName()">Set</button>
+          </div>
+        </div>
+        <div class="drawer-section">
+          <div class="drawer-section-title">Topic</div>
+          <div class="drawer-row">
+            <input type="text" id="roomTopicInput" placeholder="New topic" />
+            <button class="drawer-btn drawer-btn-primary" onclick="doSetRoomTopic()">Set</button>
+          </div>
+        </div>
+        <div class="drawer-section">
+          <div class="drawer-section-title">User Actions</div>
+          <input type="text" id="userActionInput" placeholder="@user:server" style="width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;font-family:inherit;outline:none;margin-bottom:8px" />
+          <div class="drawer-row" style="flex-wrap:wrap">
+            <button class="drawer-btn drawer-btn-primary" onclick="doInviteUser()">Invite</button>
+            <button class="drawer-btn drawer-btn-secondary" onclick="doKickUser()">Kick</button>
+            <button class="drawer-btn drawer-btn-danger" onclick="doBanUser()">Ban</button>
+            <button class="drawer-btn drawer-btn-secondary" onclick="doUnbanUser()">Unban</button>
+          </div>
+        </div>
+        <div class="drawer-section" style="margin-top:32px">
+          <button class="drawer-btn drawer-btn-danger" onclick="doLeaveRoom()" style="width:100%;padding:12px">Leave Room</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Settings Drawer ═══ -->
+    <div class="room-drawer-overlay" id="settingsOverlay" onclick="closeSettingsDrawer()"></div>
+    <div class="room-drawer" id="settingsDrawer">
+      <div class="drawer-header">
+        <h3>Settings</h3>
+        <button class="drawer-close" onclick="closeSettingsDrawer()">&times;</button>
+      </div>
+      <div class="drawer-content">
+        <div class="drawer-section">
+          <div class="drawer-section-title">Account</div>
+          <div class="drawer-row">
+            <button class="drawer-btn drawer-btn-danger" onclick="doLogout()">Logout</button>
+            <button class="drawer-btn drawer-btn-danger" onclick="doClearAllData()">Wipe All Data</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Mobile Debug Bottom Sheet ═══ -->
+    <div class="debug-sheet-overlay" id="debugSheetOverlay" onclick="toggleDebugMobile()"></div>
+    <div class="debug-sheet" id="debugSheet">
+      <div class="debug-sheet-handle"></div>
+      <div class="debug-header">
+        <h3>Console</h3>
+        <button class="debug-header-btn" onclick="copyLog()" title="Copy">&#128203;</button>
+        <button class="debug-header-btn" onclick="clearLog()" title="Clear">&#128465;</button>
+        <button class="debug-header-btn" onclick="toggleDebugMobile()" title="Close">&times;</button>
+      </div>
+      <div class="debug-tabs" id="debugSheetTabs">
+        <button class="debug-tab active" data-tab="mlog" onclick="switchDebugTab(this,'mlog')">Log</button>
+        <button class="debug-tab" data-tab="msync" onclick="switchDebugTab(this,'msync')">Sync</button>
+        <button class="debug-tab" data-tab="mcrypto" onclick="switchDebugTab(this,'mcrypto')">Crypto</button>
+        <button class="debug-tab" data-tab="mrooms" onclick="switchDebugTab(this,'mrooms')">Rooms</button>
+      </div>
+      <div class="debug-tab-content active" data-tab-content="mlog">
+        <div id="debugLogMobile"></div>
+      </div>
+      <div class="debug-tab-content" data-tab-content="msync">
+        <div class="debug-section">
+          <div class="debug-section-title">Sync Controls</div>
+          <div class="debug-btn-row">
+            <button class="debug-btn accent" onclick="doStartSync()">Start</button>
+            <button class="debug-btn danger" onclick="doStopSync()">Stop</button>
+            <button class="debug-btn" onclick="doGetSyncState()">State</button>
+          </div>
+        </div>
+        <div class="debug-section">
+          <div class="debug-section-title">Session</div>
+          <div class="debug-btn-row">
+            <button class="debug-btn" onclick="doGetSession()">Check</button>
+            <button class="debug-btn danger" onclick="doLogout()">Logout</button>
+            <button class="debug-btn danger" onclick="doClearAllData()">Wipe Data</button>
+          </div>
+        </div>
+      </div>
+      <div class="debug-tab-content" data-tab-content="mcrypto">
+        <div class="debug-section">
+          <div class="debug-section-title">Encryption</div>
+          <div class="debug-btn-row">
+            <button class="debug-btn accent" onclick="doInitCrypto()">Init</button>
+            <button class="debug-btn" onclick="doGetEncryptionStatus()">Status</button>
+            <button class="debug-btn" onclick="doBootstrapCrossSigning()">Bootstrap CS</button>
+          </div>
+        </div>
+        <div class="debug-section">
+          <div class="debug-section-title">Key Backup</div>
+          <div class="debug-btn-row">
+            <button class="debug-btn accent" onclick="doSetupKeyBackup()">Setup</button>
+            <button class="debug-btn" onclick="doGetKeyBackupStatus()">Status</button>
+          </div>
+        </div>
+        <div class="debug-section">
+          <div class="debug-section-title">Recovery</div>
+          <input type="text" class="debug-input" id="passphraseInputM" placeholder="Passphrase (optional)" />
+          <div class="debug-btn-row">
+            <button class="debug-btn accent" onclick="doSetupRecovery()">Setup</button>
+            <button class="debug-btn" onclick="doIsRecoveryEnabled()">Enabled?</button>
+          </div>
+          <input type="text" class="debug-input" id="recoveryKeyInputM" placeholder="Recovery key" />
+          <div class="debug-btn-row">
+            <button class="debug-btn accent" onclick="doRecoverAndSetup()">Recover</button>
+            <button class="debug-btn danger" onclick="doResetRecoveryKey()">Reset Key</button>
+          </div>
+        </div>
+      </div>
+      <div class="debug-tab-content" data-tab-content="mrooms">
+        <div class="debug-section">
+          <div class="debug-section-title">Create Room</div>
+          <input type="text" class="debug-input" id="createRoomNameM" placeholder="Room name" />
+          <input type="text" class="debug-input" id="createRoomTopicM" placeholder="Topic (optional)" />
+          <input type="text" class="debug-input" id="createRoomInviteM" placeholder="Invite: @a:srv, @b:srv" />
+          <div class="debug-checkbox">
+            <input type="checkbox" id="createRoomEncryptedM" />
+            <span>Encrypt</span>
+          </div>
+          <div class="debug-btn-row">
+            <button class="debug-btn accent" onclick="doCreateRoom()">Create</button>
+          </div>
+        </div>
+        <div class="debug-section">
+          <div class="debug-section-title">Join Room</div>
+          <input type="text" class="debug-input" id="joinRoomInputM" placeholder="Room ID or alias" />
+          <div class="debug-btn-row">
+            <button class="debug-btn accent" onclick="doJoinRoom()">Join</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Crypto Modal ═══ -->
     <div class="modal-overlay" id="cryptoModal">
-      <div class="modal" id="cryptoModalContent">
-        <!-- Dynamically filled by JS -->
+      <div class="modal" id="cryptoModalContent"></div>
+    </div>
+
+    <!-- ═══ Create Room Modal ═══ -->
+    <div class="modal-overlay" id="createRoomModal">
+      <div class="modal">
+        <h2>New Room</h2>
+        <label>Name</label>
+        <input type="text" id="createRoomNameModal" placeholder="Room name" />
+        <label>Topic (optional)</label>
+        <input type="text" id="createRoomTopicModal" placeholder="What's this room about?" />
+        <label>Invite people</label>
+        <div style="position:relative">
+          <input type="text" id="userSearchInput" placeholder="Search users..." oninput="onUserSearchInput()" autocomplete="off" />
+          <div id="userSearchResults" style="display:none;position:absolute;left:0;right:0;top:100%;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-md);max-height:180px;overflow-y:auto;z-index:10"></div>
+        </div>
+        <div id="selectedUsers" style="display:flex;flex-wrap:wrap;gap:6px;min-height:0;margin-bottom:12px"></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <input type="checkbox" id="createRoomEncryptedModal" style="width:auto;margin:0" />
+          <span style="font-size:13px;color:var(--text-secondary)">Enable encryption</span>
+        </div>
+        <div class="btn-row">
+          <button class="modal-btn modal-btn-secondary" onclick="hideCreateRoomModal()">Cancel</button>
+          <button class="modal-btn modal-btn-primary" onclick="doCreateRoomFromModal()">Create</button>
+        </div>
       </div>
     </div>
 

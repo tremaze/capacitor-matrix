@@ -254,6 +254,24 @@ class MatrixSDKBridge {
         try await timeline.sendReaction(eventId: eventId, key: key)
     }
 
+    // MARK: - User Discovery
+
+    func searchUsers(searchTerm: String, limit: Int) async throws -> [String: Any] {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        let result = try await c.searchUsers(searchTerm: searchTerm, limit: UInt64(limit))
+        let users = result.results.map { u -> [String: Any?] in
+            [
+                "userId": u.userId,
+                "displayName": u.displayName,
+                "avatarUrl": u.avatarUrl,
+            ]
+        }
+        return [
+            "results": users,
+            "limited": result.limited,
+        ]
+    }
+
     // MARK: - Room Management
 
     func setRoomName(roomId: String, name: String) async throws {

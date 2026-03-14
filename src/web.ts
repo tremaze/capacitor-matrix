@@ -27,6 +27,7 @@ import type {
   KeyBackupStatus,
   RecoveryKeyInfo,
   PresenceInfo,
+  UserProfile,
 } from './definitions';
 
 const SESSION_KEY = 'matrix_session';
@@ -312,6 +313,13 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
     // If no explicit pagination token, return events from the synced timeline
     if (!options.from && room) {
+      // Paginate backwards so we have enough events (initial sync may be small)
+      try {
+        await this.client!.scrollback(room, limit);
+      } catch {
+        // scrollback may fail if there's no more history
+      }
+
       const timeline = room.getLiveTimeline();
       const timelineEvents = timeline.getEvents();
       const events: MatrixEvent[] = timelineEvents
@@ -646,6 +654,25 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       isEncrypted: room.hasEncryptionStateEvent(),
       unreadCount: room.getUnreadNotificationCount() ?? 0,
       lastEventTs: room.getLastActiveTimestamp() || undefined,
+    };
+  }
+
+  async searchUsers(options: {
+    searchTerm: string;
+    limit?: number;
+  }): Promise<{ results: UserProfile[]; limited: boolean }> {
+    this.requireClient();
+    const resp = await this.client!.searchUserDirectory({
+      term: options.searchTerm,
+      limit: options.limit ?? 10,
+    });
+    return {
+      results: resp.results.map((u: { user_id: string; display_name?: string; avatar_url?: string }) => ({
+        userId: u.user_id,
+        displayName: u.display_name,
+        avatarUrl: u.avatar_url,
+      })),
+      limited: resp.limited,
     };
   }
 

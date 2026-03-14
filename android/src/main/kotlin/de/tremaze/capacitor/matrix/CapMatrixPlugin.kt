@@ -303,6 +303,21 @@ class MatrixPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun searchUsers(call: PluginCall) {
+        val searchTerm = call.getString("searchTerm") ?: return call.reject("Missing searchTerm")
+        val limit = call.getInt("limit", 10)!!.toLong()
+
+        scope.launch {
+            try {
+                val result = bridge.searchUsers(searchTerm, limit)
+                call.resolve(mapToJSObject(result))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "searchUsers failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
     fun setRoomName(call: PluginCall) {
         val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
         val name = call.getString("name") ?: return call.reject("Missing name")
