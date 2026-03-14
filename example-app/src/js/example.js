@@ -29,6 +29,39 @@ window.clearLog = () => {
   logEl.innerHTML = '';
 };
 
+window.copyLog = async () => {
+  const text = logEl.innerText;
+  if (!text) return log('Nothing to copy', 'error');
+  try {
+    await navigator.clipboard.writeText(text);
+    log('Log copied to clipboard', 'success');
+  } catch {
+    // Fallback for environments without clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    log('Log copied to clipboard', 'success');
+  }
+};
+
+// ── Mobile keyboard handling ──────────────────────────
+
+if ('visualViewport' in window) {
+  window.visualViewport.addEventListener('resize', () => {
+    const composeBar = document.getElementById('composeBar');
+    if (composeBar && document.activeElement?.closest('#composeBar')) {
+      requestAnimationFrame(() => {
+        composeBar.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+    }
+  });
+}
+
 // ── Status ─────────────────────────────────────────────
 
 function setStatus(text, state) {
@@ -108,6 +141,23 @@ window.doLogout = async () => {
     document.getElementById('roomDetail').classList.add('hidden');
   } catch (e) {
     logError('Logout', e);
+  }
+};
+
+window.doClearAllData = async () => {
+  if (!confirm('This will delete ALL Matrix data (session, crypto keys, messages). Continue?')) return;
+  log('Wiping all data...');
+  try {
+    await Matrix.clearAllData();
+    log('All data wiped', 'success');
+    setStatus('Not connected');
+    selectedRoomId = null;
+    currentUserId = null;
+    document.getElementById('roomList').innerHTML = '';
+    document.getElementById('roomDetail').classList.add('hidden');
+    localStorage.clear();
+  } catch (e) {
+    logError('clearAllData', e);
   }
 };
 
@@ -281,8 +331,15 @@ async function checkAndPromptCrypto() {
     log(`Crypto check: secretStorage=${status.isSecretStorageReady}, crossSigning=${status.isCrossSigningReady}, keyBackup=${status.isKeyBackupEnabled}`, 'event');
 
     if (!status.isSecretStorageReady) {
-      // Recovery not set up at all — prompt to create it
-      showSetupRecoveryModal();
+      // Check if a backup already exists on the server
+      const backupStatus = await Matrix.getKeyBackupStatus().catch(() => ({ exists: false }));
+      if (backupStatus.exists) {
+        // Backup exists server-side but this device isn't set up — need to recover
+        showRecoverModal();
+      } else {
+        // No backup at all — prompt to create one
+        showSetupRecoveryModal();
+      }
     } else if (!status.isKeyBackupEnabled) {
       // Secret storage exists but key backup isn't enabled on this device —
       // need recovery key/passphrase to unlock
@@ -326,9 +383,14 @@ window.doModalSetupRecovery = async () => {
     // Show recovery key to the user
     showRecoveryKeyModal(result.recoveryKey);
   } catch (e) {
-    logError('setupRecovery', e);
-    btn.disabled = false;
-    btn.textContent = 'Set Up Encryption';
+    if (e.message?.includes('BACKUP_EXISTS')) {
+      log('Existing backup found — prompting for recovery key', 'event');
+      showRecoverModal();
+    } else {
+      logError('setupRecovery', e);
+      btn.disabled = false;
+      btn.textContent = 'Set Up Encryption';
+    }
   }
 };
 
@@ -407,6 +469,13 @@ window.doModalRecover = async () => {
     // Re-check status
     const status = await Matrix.getEncryptionStatus();
     logResult('Encryption status after recovery', status);
+
+    // Reload messages in the current room to retry decryption
+    if (selectedRoomId) {
+      try {
+        await loadMessages(selectedRoomId);
+      } catch (_) {}
+    }
   } catch (e) {
     logError('recover', e);
     // Show error with reset option
@@ -508,7 +577,11 @@ window.doSetupRecovery = async () => {
     logResult('Recovery setup', result);
     log(`Recovery key: ${result.recoveryKey}`, 'success');
   } catch (e) {
-    logError('setupRecovery', e);
+    if (e.message?.includes('BACKUP_EXISTS')) {
+      log('A backup already exists. Enter your recovery key below and use "Recover".', 'error');
+    } else {
+      logError('setupRecovery', e);
+    }
   }
 };
 

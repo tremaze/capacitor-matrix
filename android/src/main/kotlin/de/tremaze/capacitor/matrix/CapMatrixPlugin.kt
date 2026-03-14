@@ -67,6 +67,16 @@ class MatrixPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun clearAllData(call: PluginCall) {
+        try {
+            bridge.clearAllData()
+            call.resolve()
+        } catch (e: Exception) {
+            call.reject(e.message ?: "clearAllData failed", e)
+        }
+    }
+
+    @PluginMethod
     fun getSession(call: PluginCall) {
         try {
             val session = bridge.getSession()
@@ -89,16 +99,12 @@ class MatrixPlugin : Plugin() {
                         notifyListeners("syncStateChange", JSObject().put("state", state))
                     },
                     onMessage = { event ->
-                        val jsEvent = JSObject()
-                        event.forEach { (key, value) -> jsEvent.put(key, value) }
-                        notifyListeners("messageReceived", JSObject().put("event", jsEvent))
+                        notifyListeners("messageReceived", JSObject().put("event", mapToJSObject(event)))
                     },
                     onRoomUpdate = { roomId, summary ->
-                        val jsSummary = JSObject()
-                        summary.forEach { (key, value) -> jsSummary.put(key, value) }
                         notifyListeners(
                             "roomUpdated",
-                            JSObject().put("roomId", roomId).put("summary", jsSummary),
+                            JSObject().put("roomId", roomId).put("summary", mapToJSObject(summary)),
                         )
                     },
                 )
@@ -133,17 +139,15 @@ class MatrixPlugin : Plugin() {
 
     @PluginMethod
     fun getRooms(call: PluginCall) {
-        try {
-            val rooms = bridge.getRooms()
-            val jsRooms = JSArray()
-            rooms.forEach { room ->
-                val jsRoom = JSObject()
-                room.forEach { (key, value) -> jsRoom.put(key, value) }
-                jsRooms.put(jsRoom)
+        scope.launch {
+            try {
+                val rooms = bridge.getRooms()
+                val jsRooms = JSArray()
+                rooms.forEach { room -> jsRooms.put(mapToJSObject(room)) }
+                call.resolve(JSObject().put("rooms", jsRooms))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "getRooms failed", e)
             }
-            call.resolve(JSObject().put("rooms", jsRooms))
-        } catch (e: Exception) {
-            call.reject(e.message ?: "getRooms failed", e)
         }
     }
 
@@ -155,11 +159,7 @@ class MatrixPlugin : Plugin() {
             try {
                 val members = bridge.getRoomMembers(roomId)
                 val jsMembers = JSArray()
-                members.forEach { member ->
-                    val jsMember = JSObject()
-                    member.forEach { (key, value) -> jsMember.put(key, value) }
-                    jsMembers.put(jsMember)
-                }
+                members.forEach { member -> jsMembers.put(mapToJSObject(member)) }
                 call.resolve(JSObject().put("members", jsMembers))
             } catch (e: Exception) {
                 call.reject(e.message ?: "getRoomMembers failed", e)
@@ -224,9 +224,7 @@ class MatrixPlugin : Plugin() {
                 val jsEvents = JSArray()
                 @Suppress("UNCHECKED_CAST")
                 (result["events"] as? List<Map<String, Any?>>)?.forEach { event ->
-                    val jsEvent = JSObject()
-                    event.forEach { (key, value) -> jsEvent.put(key, value) }
-                    jsEvents.put(jsEvent)
+                    jsEvents.put(mapToJSObject(event))
                 }
                 jsResult.put("events", jsEvents)
                 jsResult.put("nextBatch", result["nextBatch"])
@@ -439,22 +437,32 @@ class MatrixPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun bootstrapCrossSigning(call: PluginCall) {
+        scope.launch {
+            try {
+                bridge.bootstrapCrossSigning()
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "bootstrapCrossSigning failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun exportRoomKeys(call: PluginCall) {
+        call.reject("exportRoomKeys is not supported on native — use recovery key instead")
+    }
+
+    @PluginMethod
+    fun importRoomKeys(call: PluginCall) {
+        call.reject("importRoomKeys is not supported on native — use recovery key instead")
+    }
+
+    @PluginMethod
     fun getEncryptionStatus(call: PluginCall) {
         scope.launch {
             try {
-                val status = bridge.getEncryptionStatus()
-                val jsResult = JSObject()
-                jsResult.put("isCrossSigningReady", status["isCrossSigningReady"])
-                @Suppress("UNCHECKED_CAST")
-                val crossSigning = status["crossSigningStatus"] as? Map<String, Any?>
-                if (crossSigning != null) {
-                    val jsCrossSigning = JSObject()
-                    crossSigning.forEach { (key, value) -> jsCrossSigning.put(key, value) }
-                    jsResult.put("crossSigningStatus", jsCrossSigning)
-                }
-                jsResult.put("isKeyBackupEnabled", status["isKeyBackupEnabled"])
-                jsResult.put("isSecretStorageReady", status["isSecretStorageReady"])
-                call.resolve(jsResult)
+                call.resolve(mapToJSObject(bridge.getEncryptionStatus()))
             } catch (e: Exception) {
                 call.reject(e.message ?: "getEncryptionStatus failed", e)
             }
@@ -466,9 +474,7 @@ class MatrixPlugin : Plugin() {
         scope.launch {
             try {
                 val result = bridge.setupKeyBackup()
-                val jsResult = JSObject()
-                result.forEach { (key, value) -> jsResult.put(key, value) }
-                call.resolve(jsResult)
+                call.resolve(mapToJSObject(result))
             } catch (e: Exception) {
                 call.reject(e.message ?: "setupKeyBackup failed", e)
             }
@@ -480,9 +486,7 @@ class MatrixPlugin : Plugin() {
         scope.launch {
             try {
                 val result = bridge.getKeyBackupStatus()
-                val jsResult = JSObject()
-                result.forEach { (key, value) -> jsResult.put(key, value) }
-                call.resolve(jsResult)
+                call.resolve(mapToJSObject(result))
             } catch (e: Exception) {
                 call.reject(e.message ?: "getKeyBackupStatus failed", e)
             }
@@ -496,9 +500,7 @@ class MatrixPlugin : Plugin() {
         scope.launch {
             try {
                 val result = bridge.restoreKeyBackup(recoveryKey)
-                val jsResult = JSObject()
-                result.forEach { (key, value) -> jsResult.put(key, value) }
-                call.resolve(jsResult)
+                call.resolve(mapToJSObject(result))
             } catch (e: Exception) {
                 call.reject(e.message ?: "restoreKeyBackup failed", e)
             }
@@ -512,9 +514,7 @@ class MatrixPlugin : Plugin() {
         scope.launch {
             try {
                 val result = bridge.setupRecovery(passphrase)
-                val jsResult = JSObject()
-                result.forEach { (key, value) -> jsResult.put(key, value) }
-                call.resolve(jsResult)
+                call.resolve(mapToJSObject(result))
             } catch (e: Exception) {
                 call.reject(e.message ?: "setupRecovery failed", e)
             }
@@ -535,7 +535,8 @@ class MatrixPlugin : Plugin() {
 
     @PluginMethod
     fun recoverAndSetup(call: PluginCall) {
-        val recoveryKey = call.getString("recoveryKey") ?: return call.reject("Missing recoveryKey")
+        val recoveryKey = call.getString("recoveryKey") ?: call.getString("passphrase")
+            ?: return call.reject("Missing recoveryKey or passphrase")
 
         scope.launch {
             try {
@@ -552,9 +553,7 @@ class MatrixPlugin : Plugin() {
         scope.launch {
             try {
                 val result = bridge.resetRecoveryKey()
-                val jsResult = JSObject()
-                result.forEach { (key, value) -> jsResult.put(key, value) }
-                call.resolve(jsResult)
+                call.resolve(mapToJSObject(result))
             } catch (e: Exception) {
                 call.reject(e.message ?: "resetRecoveryKey failed", e)
             }
@@ -568,5 +567,27 @@ class MatrixPlugin : Plugin() {
             put("deviceId", deviceId)
             put("homeserverUrl", homeserverUrl)
         }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun mapToJSObject(map: Map<String, Any?>): JSObject {
+        val obj = JSObject()
+        map.forEach { (key, value) ->
+            when (value) {
+                is Map<*, *> -> obj.put(key, mapToJSObject(value as Map<String, Any?>))
+                is List<*> -> {
+                    val arr = JSArray()
+                    value.forEach { item ->
+                        when (item) {
+                            is Map<*, *> -> arr.put(mapToJSObject(item as Map<String, Any?>))
+                            else -> arr.put(item)
+                        }
+                    }
+                    obj.put(key, arr)
+                }
+                else -> obj.put(key, value)
+            }
+        }
+        return obj
     }
 }

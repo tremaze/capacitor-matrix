@@ -17,6 +17,10 @@
         padding: 16px;
         padding-top: max(16px, env(safe-area-inset-top));
         padding-bottom: max(16px, env(safe-area-inset-bottom));
+        padding-left: max(16px, env(safe-area-inset-left));
+        padding-right: max(16px, env(safe-area-inset-right));
+        -webkit-tap-highlight-color: transparent;
+        -webkit-text-size-adjust: 100%;
       }
       h1 { font-size: 20px; margin-bottom: 12px; }
       h2 { font-size: 16px; margin: 16px 0 8px; color: #555; }
@@ -37,19 +41,22 @@
         margin-bottom: 8px;
       }
       button {
-        padding: 8px 16px;
+        padding: 10px 16px;
         border: none;
         border-radius: 4px;
         font-size: 14px;
         cursor: pointer;
         margin-right: 4px;
         margin-bottom: 4px;
+        min-height: 44px;
+        touch-action: manipulation;
       }
       .btn-primary { background: #4CAF50; color: white; }
       .btn-secondary { background: #2196F3; color: white; }
       .btn-danger { background: #f44336; color: white; }
-      .btn-small { padding: 4px 8px; font-size: 12px; }
-      button:active { opacity: 0.8; }
+      .btn-small { padding: 6px 10px; font-size: 12px; min-height: 36px; }
+      button:active { opacity: 0.7; transform: scale(0.97); }
+      input, select { min-height: 44px; touch-action: manipulation; }
       #log {
         background: #1e1e1e;
         color: #d4d4d4;
@@ -82,23 +89,26 @@
       .status-dot.error { background: #f44336; }
       .room-list { list-style: none; }
       .room-list li {
-        padding: 8px;
+        padding: 12px 8px;
         border-bottom: 1px solid #eee;
         cursor: pointer;
-        font-size: 13px;
+        font-size: 14px;
+        min-height: 44px;
+        touch-action: manipulation;
       }
-      .room-list li:hover { background: #f0f0f0; }
+      .room-list li:active { background: #f0f0f0; }
+      @media (hover: hover) { .room-list li:hover { background: #f0f0f0; } }
       .room-list li .room-name { font-weight: 600; }
       .room-list li .room-meta { font-size: 11px; color: #999; }
       .room-list li.selected { background: #e3f2fd; border-left: 3px solid #2196F3; }
       .hidden { display: none; }
-      .flex-row { display: flex; gap: 4px; }
-      .flex-row input { flex: 1; }
+      .flex-row { display: flex; gap: 4px; flex-wrap: wrap; }
+      .flex-row input { flex: 1; min-width: 0; }
       /* Conversation view */
       #conversation {
         display: flex;
         flex-direction: column;
-        height: 350px;
+        height: min(50vh, 400px);
         border: 1px solid #eee;
         border-radius: 4px;
         margin: 8px 0;
@@ -161,12 +171,14 @@
         background: none;
         border: 1px solid #ddd;
         border-radius: 10px;
-        padding: 1px 6px;
-        font-size: 11px;
+        padding: 4px 10px;
+        font-size: 13px;
         cursor: pointer;
         margin: 0;
+        min-height: 28px;
+        touch-action: manipulation;
       }
-      .msg-actions button:hover { background: #f0f0f0; }
+      .msg-actions button:active { background: #f0f0f0; }
       .msg-reactions {
         display: flex;
         gap: 2px;
@@ -174,10 +186,10 @@
         margin-top: 2px;
       }
       .msg-reactions .reaction-chip {
-        font-size: 11px;
+        font-size: 13px;
         background: #e3f2fd;
         border-radius: 10px;
-        padding: 1px 6px;
+        padding: 4px 8px;
         cursor: default;
       }
       #typingIndicator {
@@ -188,13 +200,13 @@
         font-style: italic;
       }
       .media-preview img {
-        max-width: 200px;
+        max-width: min(200px, 60vw);
         max-height: 200px;
         border-radius: 4px;
         cursor: pointer;
       }
       .media-preview audio, .media-preview video {
-        max-width: 250px;
+        max-width: min(250px, 70vw);
       }
       .media-preview a {
         color: #2196F3;
@@ -206,8 +218,9 @@
         padding: 8px;
         border-top: 1px solid #eee;
         background: #fff;
+        align-items: center;
       }
-      #composeBar input { margin-bottom: 0; }
+      #composeBar input { margin-bottom: 0; flex: 1; min-width: 0; }
       .room-header {
         display: flex;
         align-items: center;
@@ -288,6 +301,20 @@
         margin-right: 6px;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* Keyboard-aware: shrink conversation when keyboard is visible */
+      @media (max-height: 500px) {
+        #conversation { height: 30vh; }
+        body { padding: 8px; padding-top: max(8px, env(safe-area-inset-top)); }
+      }
+
+      /* Narrow devices */
+      @media (max-width: 360px) {
+        body { padding: 8px; }
+        .card { padding: 8px; }
+        h1 { font-size: 18px; }
+        .modal { padding: 16px; }
+      }
     </style>
   </head>
   <body>
@@ -299,7 +326,6 @@
         <div class="status-dot" id="statusDot"></div>
         <span id="statusText">Not connected</span>
         <span style="flex:1"></span>
-        <button class="btn-small btn-danger" id="btnClearLog" onclick="clearLog()">Clear Log</button>
       </div>
     </div>
 
@@ -328,6 +354,7 @@
       <button class="btn-small btn-secondary" onclick="toggleAuthMode()">Switch to Token Auth</button>
       <button class="btn-small btn-secondary" onclick="doGetSession()">Check Session</button>
       <button class="btn-small btn-danger" onclick="doLogout()">Logout</button>
+      <button class="btn-small btn-danger" onclick="doClearAllData()">Wipe All Data</button>
     </div>
 
     <!-- Sync Section -->
@@ -437,7 +464,11 @@
 
     <!-- Log Output -->
     <div class="card">
-      <h2>Log</h2>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <h2 style="margin:0;flex:1">Log</h2>
+        <button class="btn-small btn-secondary" onclick="copyLog()">Copy</button>
+        <button class="btn-small btn-danger" onclick="clearLog()">Clear</button>
+      </div>
       <div id="log"></div>
     </div>
 

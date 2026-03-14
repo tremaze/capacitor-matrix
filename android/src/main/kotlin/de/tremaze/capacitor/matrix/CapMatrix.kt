@@ -15,23 +15,27 @@ import org.matrix.rustcomponents.sdk.CreateRoomParameters
 import org.matrix.rustcomponents.sdk.EnableRecoveryProgress
 import org.matrix.rustcomponents.sdk.EnableRecoveryProgressListener
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
+import org.matrix.rustcomponents.sdk.MembershipState
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ReceiptType
+import org.matrix.rustcomponents.sdk.RecoveryException
 import org.matrix.rustcomponents.sdk.RecoveryState
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.RoomPreset
 import org.matrix.rustcomponents.sdk.RoomVisibility
 import org.matrix.rustcomponents.sdk.Session
+import org.matrix.rustcomponents.sdk.SlidingSyncVersion
+import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.SyncServiceState
 import org.matrix.rustcomponents.sdk.SyncServiceStateObserver
-import org.matrix.rustcomponents.sdk.TimelineChange
 import org.matrix.rustcomponents.sdk.TimelineDiff
 import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.VerificationState
+import uniffi.matrix_sdk_base.EncryptionState
 import org.matrix.rustcomponents.sdk.messageEventContentFromMarkdown
 import java.util.Collections
 
@@ -53,11 +57,19 @@ class MatrixSDKBridge(private val context: Context) {
     // ── Auth ──────────────────────────────────────────────
 
     suspend fun login(homeserverUrl: String, userId: String, password: String): SessionInfo {
-        val dataDir = context.filesDir.resolve("matrix_sdk").absolutePath
+        // Use a per-user data directory to avoid crypto store conflicts
+        val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_.-]"), "_")
+        val dataDir = context.filesDir.resolve("matrix_sdk/$safeUserId")
+        // Clear previous session data to avoid device ID mismatches
+        dataDir.deleteRecursively()
+        dataDir.mkdirs()
+        val dataDirPath = dataDir.absolutePath
 
         val newClient = ClientBuilder()
             .homeserverUrl(homeserverUrl)
-            .sqliteStore(SqliteStoreBuilder(dataDir, dataDir))
+            .slidingSyncVersionBuilder(SlidingSyncVersionBuilder.NATIVE)
+            .autoEnableCrossSigning(true)
+            .sqliteStore(SqliteStoreBuilder(dataDirPath, dataDirPath))
             .build()
 
         newClient.login(userId, password, "Capacitor Matrix Plugin", null)
@@ -75,11 +87,16 @@ class MatrixSDKBridge(private val context: Context) {
         userId: String,
         deviceId: String,
     ): SessionInfo {
-        val dataDir = context.filesDir.resolve("matrix_sdk").absolutePath
+        val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_.-]"), "_")
+        val dataDir = context.filesDir.resolve("matrix_sdk/$safeUserId")
+        dataDir.mkdirs()
+        val dataDirPath = dataDir.absolutePath
 
         val newClient = ClientBuilder()
             .homeserverUrl(homeserverUrl)
-            .sqliteStore(SqliteStoreBuilder(dataDir, dataDir))
+            .slidingSyncVersionBuilder(SlidingSyncVersionBuilder.NATIVE)
+            .autoEnableCrossSigning(true)
+            .sqliteStore(SqliteStoreBuilder(dataDirPath, dataDirPath))
             .build()
 
         val session = Session(
@@ -88,7 +105,8 @@ class MatrixSDKBridge(private val context: Context) {
             userId = userId,
             deviceId = deviceId,
             homeserverUrl = homeserverUrl,
-            slidingSyncVersion = null,
+            oidcData = null,
+            slidingSyncVersion = SlidingSyncVersion.NATIVE,
         )
 
         newClient.restoreSession(session)
@@ -110,6 +128,14 @@ class MatrixSDKBridge(private val context: Context) {
         client?.logout()
         client = null
         sessionStore.clear()
+    }
+
+    fun clearAllData() {
+        syncService = null
+        client = null
+        sessionStore.clear()
+        val sdkDir = context.filesDir.resolve("matrix_sdk")
+        sdkDir.deleteRecursively()
     }
 
     fun getSession(): SessionInfo? {
@@ -146,22 +172,38 @@ class MatrixSDKBridge(private val context: Context) {
 
     // ── Rooms ─────────────────────────────────────────────
 
-    fun getRooms(): List<Map<String, Any?>> {
+    suspend fun getRooms(): List<Map<String, Any?>> {
         val c = requireClient()
-        return c.rooms().map { serializeRoom(it) }
+        val result = mutableListOf<Map<String, Any?>>()
+        for (room in c.rooms()) {
+            result.add(serializeRoom(room))
+        }
+        return result
     }
 
     suspend fun getRoomMembers(roomId: String): List<Map<String, Any?>> {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
-        val members = room.members()
-        return members.map { member ->
-            mapOf(
-                "userId" to member.userId,
-                "displayName" to member.displayName,
-                "membership" to member.membership.name.lowercase(),
-            )
+        val iterator = room.members()
+        val result = mutableListOf<Map<String, Any?>>()
+        while (true) {
+            val chunk = iterator.nextChunk(100u) ?: break
+            for (member in chunk) {
+                result.add(mapOf(
+                    "userId" to member.userId,
+                    "displayName" to member.displayName,
+                    "membership" to when (member.membership) {
+                        is MembershipState.Ban -> "ban"
+                        is MembershipState.Invite -> "invite"
+                        is MembershipState.Join -> "join"
+                        is MembershipState.Knock -> "knock"
+                        is MembershipState.Leave -> "leave"
+                        else -> "unknown"
+                    },
+                ))
+            }
         }
+        return result
     }
 
     suspend fun joinRoom(roomIdOrAlias: String): String {
@@ -227,7 +269,7 @@ class MatrixSDKBridge(private val context: Context) {
             }
         })
 
-        timeline.paginateBackwards(requestedLimit.toUInt())
+        timeline.paginateBackwards(requestedLimit.toUShort())
         delay(500) // Allow listener to process pagination diffs
 
         handle.cancel()
@@ -250,14 +292,14 @@ class MatrixSDKBridge(private val context: Context) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
         val timeline = room.timeline()
-        timeline.redact(EventOrTransactionId.EventId(eventId), reason)
+        timeline.redactEvent(EventOrTransactionId.EventId(eventId), reason)
     }
 
     suspend fun sendReaction(roomId: String, eventId: String, key: String) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
         val timeline = room.timeline()
-        timeline.sendReaction(eventId, key)
+        timeline.toggleReaction(EventOrTransactionId.EventId(eventId), key)
     }
 
     // ── Room Management ──────────────────────────────────
@@ -313,6 +355,13 @@ class MatrixSDKBridge(private val context: Context) {
         requireClient()
     }
 
+    suspend fun bootstrapCrossSigning() {
+        val c = requireClient()
+        // Cross-signing is auto-enabled via ClientBuilder.autoEnableCrossSigning(true)
+        // Wait for E2EE initialization tasks to complete
+        c.encryption().waitForE2eeInitializationTasks()
+    }
+
     suspend fun getEncryptionStatus(): Map<String, Any?> {
         val c = requireClient()
         val enc = c.encryption()
@@ -339,7 +388,14 @@ class MatrixSDKBridge(private val context: Context) {
 
     suspend fun setupKeyBackup(): Map<String, Any?> {
         val c = requireClient()
-        c.encryption().enableBackups()
+        try {
+            c.encryption().enableBackups()
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "Failed to enable key backup. You may need to set up recovery first: ${e.message}",
+                e,
+            )
+        }
         return mapOf(
             "exists" to true,
             "enabled" to true,
@@ -348,12 +404,13 @@ class MatrixSDKBridge(private val context: Context) {
 
     suspend fun getKeyBackupStatus(): Map<String, Any?> {
         val c = requireClient()
+        val existsOnServer = c.encryption().backupExistsOnServer()
         val state = c.encryption().backupState()
         val enabled = state == BackupState.ENABLED ||
             state == BackupState.CREATING ||
             state == BackupState.RESUMING
         return mapOf(
-            "exists" to enabled,
+            "exists" to existsOnServer,
             "enabled" to enabled,
         )
     }
@@ -368,16 +425,25 @@ class MatrixSDKBridge(private val context: Context) {
 
     suspend fun setupRecovery(passphrase: String?): Map<String, Any?> {
         val c = requireClient()
-        val key = c.encryption().enableRecovery(
-            waitForBackupsToUpload = true,
-            passphrase = passphrase,
-            progressListener = object : EnableRecoveryProgressListener {
-                override fun onUpdate(status: EnableRecoveryProgress) {
-                    // no-op — callers get the key from the return value
-                }
-            },
-        )
-        return mapOf("recoveryKey" to key)
+        try {
+            val key = c.encryption().enableRecovery(
+                waitForBackupsToUpload = false,
+                passphrase = passphrase,
+                progressListener = object : EnableRecoveryProgressListener {
+                    override fun onUpdate(status: EnableRecoveryProgress) {
+                        // no-op — callers get the key from the return value
+                    }
+                },
+            )
+            return mapOf("recoveryKey" to key)
+        } catch (e: RecoveryException.BackupExistsOnServer) {
+            throw IllegalStateException(
+                "BACKUP_EXISTS",
+                e,
+            )
+        } catch (e: Exception) {
+            throw IllegalStateException("Failed to set up recovery: ${e::class.simpleName}: ${e.message}", e)
+        }
     }
 
     suspend fun isRecoveryEnabled(): Boolean {
@@ -402,14 +468,14 @@ class MatrixSDKBridge(private val context: Context) {
         return client ?: throw IllegalStateException("Not logged in. Call login() or loginWithToken() first.")
     }
 
-    private fun serializeRoom(room: Room): Map<String, Any?> {
+    private suspend fun serializeRoom(room: Room): Map<String, Any?> {
         val info = room.roomInfo()
         return mapOf(
             "roomId" to room.id(),
             "name" to (info.displayName ?: ""),
             "topic" to info.topic,
-            "memberCount" to (info.joinedMembersCount?.toInt() ?: 0),
-            "isEncrypted" to info.isEncrypted,
+            "memberCount" to info.joinedMembersCount.toInt(),
+            "isEncrypted" to (info.encryptionState != EncryptionState.NOT_ENCRYPTED),
             "unreadCount" to (info.numUnreadMessages?.toInt() ?: 0),
             "lastEventTs" to null,
         )
@@ -420,26 +486,25 @@ class MatrixSDKBridge(private val context: Context) {
         roomId: String,
         events: MutableList<Map<String, Any?>>,
     ) {
-        when (diff.change()) {
-            TimelineChange.Reset -> {
+        when (diff) {
+            is TimelineDiff.Clear -> {
                 events.clear()
-                diff.reset()?.forEach { item ->
+            }
+            is TimelineDiff.Append -> {
+                diff.values.forEach { item ->
                     serializeTimelineItem(item, roomId)?.let { events.add(it) }
                 }
             }
-            TimelineChange.Append -> {
-                diff.append()?.forEach { item ->
-                    serializeTimelineItem(item, roomId)?.let { events.add(it) }
-                }
+            is TimelineDiff.PushBack -> {
+                serializeTimelineItem(diff.value, roomId)?.let { events.add(it) }
             }
-            TimelineChange.PushBack -> {
-                diff.pushBack()?.let { item ->
-                    serializeTimelineItem(item, roomId)?.let { events.add(it) }
-                }
+            is TimelineDiff.PushFront -> {
+                serializeTimelineItem(diff.value, roomId)?.let { events.add(0, it) }
             }
-            TimelineChange.PushFront -> {
-                diff.pushFront()?.let { item ->
-                    serializeTimelineItem(item, roomId)?.let { events.add(0, it) }
+            is TimelineDiff.Reset -> {
+                events.clear()
+                diff.values.forEach { item ->
+                    serializeTimelineItem(item, roomId)?.let { events.add(it) }
                 }
             }
             else -> {}
@@ -449,7 +514,7 @@ class MatrixSDKBridge(private val context: Context) {
     private fun serializeTimelineItem(item: TimelineItem, roomId: String): Map<String, Any?>? {
         val eventItem = item.asEvent() ?: return null
 
-        val eventId = when (val id = eventItem.eventOrTransactionId()) {
+        val eventId = when (val id = eventItem.eventOrTransactionId) {
             is EventOrTransactionId.EventId -> id.eventId
             is EventOrTransactionId.TransactionId -> id.transactionId
             else -> ""
@@ -459,40 +524,54 @@ class MatrixSDKBridge(private val context: Context) {
         var eventType = "m.room.message"
 
         try {
-            when (val content = eventItem.content()) {
+            val content = eventItem.content
+            android.util.Log.d("CapMatrix", "Item content type: ${content::class.simpleName}, sender=${eventItem.sender}, id=$eventId")
+            when (content) {
                 is TimelineItemContent.MsgLike -> {
-                    when (val kind = content.content.kind) {
+                    val kind = content.content.kind
+                    android.util.Log.d("CapMatrix", "  MsgLike kind: ${kind::class.simpleName}")
+                    when (kind) {
                         is MsgLikeKind.Message -> {
                             contentMap["body"] = kind.content.body
                             contentMap["msgtype"] = "m.text"
                         }
-                        else -> {}
+                        is MsgLikeKind.UnableToDecrypt -> {
+                            contentMap["body"] = "Unable to decrypt message"
+                            contentMap["msgtype"] = "m.text"
+                            contentMap["encrypted"] = true
+                            android.util.Log.d("CapMatrix", "  UTD msg: ${kind.msg}")
+                        }
+                        else -> {
+                            android.util.Log.d("CapMatrix", "  Unhandled MsgLikeKind: ${kind::class.simpleName}")
+                        }
                     }
                 }
                 is TimelineItemContent.RoomMembership -> eventType = "m.room.member"
-                else -> {}
+                else -> {
+                    android.util.Log.d("CapMatrix", "  Unhandled content type: ${content::class.simpleName}")
+                }
             }
-        } catch (_: Exception) {
-            // Content extraction may vary by SDK version; basic event info still returned
+        } catch (e: Exception) {
+            android.util.Log.e("CapMatrix", "Error serializing timeline item: ${e.message}", e)
         }
 
         return mapOf(
             "eventId" to eventId,
             "roomId" to roomId,
-            "senderId" to eventItem.sender(),
+            "senderId" to eventItem.sender,
             "type" to eventType,
             "content" to contentMap,
-            "originServerTs" to eventItem.timestamp().toLong(),
+            "originServerTs" to eventItem.timestamp.toLong(),
         )
     }
 
     private fun mapSyncState(state: SyncServiceState): String {
         return when (state) {
-            SyncServiceState.Idle -> "STOPPED"
-            SyncServiceState.Running -> "SYNCING"
-            SyncServiceState.Terminated -> "STOPPED"
-            SyncServiceState.Error -> "ERROR"
-            SyncServiceState.Offline -> "ERROR"
+            SyncServiceState.IDLE -> "STOPPED"
+            SyncServiceState.RUNNING -> "SYNCING"
+            SyncServiceState.TERMINATED -> "STOPPED"
+            SyncServiceState.ERROR -> "ERROR"
+            SyncServiceState.OFFLINE -> "ERROR"
         }
     }
 
