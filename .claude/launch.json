@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "example-app",
+      "runtimeExecutable": "/Users/lennarttonjes/.nvm/versions/node/v22.14.0/bin/node",
+      "runtimeArgs": ["node_modules/.bin/vite"],
+      "cwd": "example-app",
+      "port": 5173
+    }
+  ]
+}
