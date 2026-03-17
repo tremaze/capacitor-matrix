@@ -312,6 +312,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`sendMessage(...)`](#sendmessage)
 * [`getRoomMessages(...)`](#getroommessages)
 * [`markRoomAsRead(...)`](#markroomasread)
+* [`refreshEventStatuses(...)`](#refresheventstatuses)
 * [`redactEvent(...)`](#redactevent)
 * [`sendReaction(...)`](#sendreaction)
 * [`setRoomName(...)`](#setroomname)
@@ -537,6 +538,21 @@ markRoomAsRead(options: { roomId: string; eventId: string; }) => Promise<void>
 | Param         | Type                                              |
 | ------------- | ------------------------------------------------- |
 | **`options`** | <code>{ roomId: string; eventId: string; }</code> |
+
+--------------------
+
+
+### refreshEventStatuses(...)
+
+```typescript
+refreshEventStatuses(options: { roomId: string; eventIds: string[]; }) => Promise<{ events: MatrixEvent[]; }>
+```
+
+| Param         | Type                                                 |
+| ------------- | ---------------------------------------------------- |
+| **`options`** | <code>{ roomId: string; eventIds: string[]; }</code> |
+
+**Returns:** <code>Promise&lt;{ events: MatrixEvent[]; }&gt;</code>
 
 --------------------
 

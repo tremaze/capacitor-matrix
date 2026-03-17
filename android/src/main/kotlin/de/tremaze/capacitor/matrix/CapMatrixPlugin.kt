@@ -258,6 +258,26 @@ class MatrixPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun refreshEventStatuses(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val eventIdsArray = call.getArray("eventIds") ?: return call.reject("Missing eventIds")
+        val eventIds = (0 until eventIdsArray.length()).map { eventIdsArray.getString(it) }
+
+        scope.launch {
+            try {
+                val events = bridge.refreshEventStatuses(roomId, eventIds)
+                val jsResult = JSObject()
+                val jsEvents = JSArray()
+                events.forEach { event -> jsEvents.put(mapToJSObject(event)) }
+                jsResult.put("events", jsEvents)
+                call.resolve(jsResult)
+            } catch (e: Exception) {
+                call.reject(e.message ?: "refreshEventStatuses failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
     fun createRoom(call: PluginCall) {
         val name = call.getString("name")
         val topic = call.getString("topic")

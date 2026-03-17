@@ -46,6 +46,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getMediaUrl", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPresence", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getPresence", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "refreshEventStatuses", returnType: CAPPluginReturnPromise),
     ]
 
     private let matrixBridge = MatrixSDKBridge()
@@ -101,6 +102,11 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    @objc func clearAllData(_ call: CAPPluginCall) {
+        matrixBridge.clearAllData()
+        call.resolve()
+    }
+
     @objc func getSession(_ call: CAPPluginCall) {
         if let session = matrixBridge.getSession() {
             call.resolve(session)
@@ -114,13 +120,21 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
             do {
                 try await matrixBridge.startSync(
                     onSyncState: { [weak self] state in
-                        self?.notifyListeners("syncStateChange", data: ["state": state])
+                        DispatchQueue.main.async {
+                            self?.notifyListeners("syncStateChange", data: ["state": state])
+                        }
                     },
                     onMessage: { [weak self] event in
-                        self?.notifyListeners("messageReceived", data: ["event": event])
+                        print("[CapMatrixPlugin] onMessage: eventId=\(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil")")
+                        DispatchQueue.main.async {
+                            print("[CapMatrixPlugin] notifyListeners messageReceived on main thread")
+                            self?.notifyListeners("messageReceived", data: ["event": event])
+                        }
                     },
                     onRoomUpdate: { [weak self] roomId, summary in
-                        self?.notifyListeners("roomUpdated", data: ["roomId": roomId, "summary": summary])
+                        DispatchQueue.main.async {
+                            self?.notifyListeners("roomUpdated", data: ["roomId": roomId, "summary": summary])
+                        }
                     }
                 )
                 call.resolve()
@@ -252,6 +266,22 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    @objc func refreshEventStatuses(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let eventIds = call.getArray("eventIds") as? [String] else {
+            return call.reject("Missing roomId or eventIds")
+        }
+
+        Task {
+            do {
+                let events = try await matrixBridge.refreshEventStatuses(roomId: roomId, eventIds: eventIds)
+                call.resolve(["events": events])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
     @objc func createRoom(_ call: CAPPluginCall) {
         let name = call.getString("name")
         let topic = call.getString("topic")
@@ -366,8 +396,8 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func recoverAndSetup(_ call: CAPPluginCall) {
-        guard let recoveryKey = call.getString("recoveryKey") else {
-            return call.reject("Missing recoveryKey")
+        guard let recoveryKey = call.getString("recoveryKey") ?? call.getString("passphrase") else {
+            return call.reject("Missing recoveryKey or passphrase")
         }
 
         Task {

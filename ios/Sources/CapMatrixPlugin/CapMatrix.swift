@@ -26,16 +26,32 @@ class MatrixSDKBridge {
     private var roomTimelines: [String: Timeline] = [:]
     // Keep strong references so GC doesn't cancel subscriptions
     private var timelineListenerHandles: [Any] = []
+    private var syncStateHandle: TaskHandle?
+    private var syncStateObserver: SyncStateObserverProxy?
+    private let subscriptionLock = NSLock()
 
     // MARK: - Auth
 
     func login(homeserverUrl: String, userId: String, password: String) async throws -> [String: String] {
+        do {
+            return try await _login(homeserverUrl: homeserverUrl, userId: userId, password: password)
+        } catch {
+            if "\(error)".contains("account in the store") {
+                print("[CapMatrix] Crypto store mismatch — clearing data and retrying login")
+                clearAllData()
+                return try await _login(homeserverUrl: homeserverUrl, userId: userId, password: password)
+            }
+            throw error
+        }
+    }
+
+    private func _login(homeserverUrl: String, userId: String, password: String) async throws -> [String: String] {
         let dataDir = Self.dataDirectory()
 
         let newClient = try await ClientBuilder()
             .homeserverUrl(url: homeserverUrl)
             .sessionPaths(dataPath: dataDir, cachePath: dataDir)
-            .slidingSyncVersionBuilder(versionBuilder: .discoverNative)
+            .slidingSyncVersionBuilder(versionBuilder: .native)
             .autoEnableCrossSigning(autoEnableCrossSigning: true)
             .build()
 
@@ -59,12 +75,26 @@ class MatrixSDKBridge {
     }
 
     func loginWithToken(homeserverUrl: String, accessToken: String, userId: String, deviceId: String) async throws -> [String: String] {
+        do {
+            return try await _loginWithToken(homeserverUrl: homeserverUrl, accessToken: accessToken, userId: userId, deviceId: deviceId)
+        } catch {
+            // If crypto store has mismatched account, wipe and retry
+            if "\(error)".contains("account in the store") {
+                print("[CapMatrix] Crypto store mismatch — clearing data and retrying login")
+                clearAllData()
+                return try await _loginWithToken(homeserverUrl: homeserverUrl, accessToken: accessToken, userId: userId, deviceId: deviceId)
+            }
+            throw error
+        }
+    }
+
+    private func _loginWithToken(homeserverUrl: String, accessToken: String, userId: String, deviceId: String) async throws -> [String: String] {
         let dataDir = Self.dataDirectory()
 
         let newClient = try await ClientBuilder()
             .homeserverUrl(url: homeserverUrl)
             .sessionPaths(dataPath: dataDir, cachePath: dataDir)
-            .slidingSyncVersionBuilder(versionBuilder: .discoverNative)
+            .slidingSyncVersionBuilder(versionBuilder: .native)
             .autoEnableCrossSigning(autoEnableCrossSigning: true)
             .build()
 
@@ -94,12 +124,26 @@ class MatrixSDKBridge {
     func logout() async throws {
         try await syncService?.stop()
         syncService = nil
+        syncStateHandle = nil
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
         subscribedRoomIds.removeAll()
         try await client?.logout()
         client = nil
         sessionStore.clear()
+    }
+
+    func clearAllData() {
+        syncService = nil
+        syncStateHandle = nil
+        client = nil
+        timelineListenerHandles.removeAll()
+        roomTimelines.removeAll()
+        subscribedRoomIds.removeAll()
+        sessionStore.clear()
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("matrix_sdk")
+        try? FileManager.default.removeItem(at: dir)
     }
 
     func getSession() -> [String: String]? {
@@ -117,49 +161,79 @@ class MatrixSDKBridge {
             throw MatrixBridgeError.notLoggedIn
         }
 
+        // Enable Rust SDK tracing to diagnose sync errors
+        let tracingConfig = TracingConfiguration(
+            filter: "warn,matrix_sdk=debug,matrix_sdk_ui=debug",
+            writeToStdoutOrSystem: true,
+            writeToFiles: nil
+        )
+        setupTracing(config: tracingConfig)
+
+        print("[CapMatrix] startSync: building sync service...")
         let service = try await c.syncService().finish()
         syncService = service
+        print("[CapMatrix] startSync: sync service built")
 
         let observer = SyncStateObserverProxy(onUpdate: { [weak self] state in
             let mapped = Self.mapSyncState(state)
+            print("[CapMatrix] SyncState changed: \(state) -> \(mapped)")
             onSyncState(mapped)
-            // When sync reaches SYNCING, subscribe to room timelines
             if mapped == "SYNCING" {
                 Task { [weak self] in
-                    await self?.subscribeToRoomTimelines(client: c, onMessage: onMessage, onRoomUpdate: onRoomUpdate)
+                    await self?.subscribeToRoomTimelines(onMessage: onMessage, onRoomUpdate: onRoomUpdate)
                 }
             }
         })
-        service.state(listener: observer)
+        syncStateObserver = observer
+        syncStateHandle = service.state(listener: observer)
 
-        // Start sync in a detached task so this method can return immediately
+        // Start sync in a detached task (matches Android's service.start() which blocks)
         Task.detached { [weak service] in
-            try? await service?.start()
+            print("[CapMatrix] startSync: calling service.start()...")
+            await service?.start()
+            print("[CapMatrix] startSync: service.start() returned")
         }
     }
 
     private func subscribeToRoomTimelines(
-        client c: Client,
         onMessage: @escaping ([String: Any]) -> Void,
         onRoomUpdate: @escaping (String, [String: Any]) -> Void
     ) async {
-        for room in c.rooms() {
+        guard let c = client else { return }
+        let rooms = c.rooms()
+
+        var roomsToSubscribe: [(Room, String)] = []
+        subscriptionLock.lock()
+        let alreadyCount = subscribedRoomIds.count
+        for room in rooms {
             let roomId = room.id()
             if subscribedRoomIds.contains(roomId) { continue }
             subscribedRoomIds.insert(roomId)
+            roomsToSubscribe.append((room, roomId))
+        }
+        subscriptionLock.unlock()
+
+        print("[CapMatrix] subscribeToRoomTimelines: \(alreadyCount) already subscribed, \(roomsToSubscribe.count) new")
+        if roomsToSubscribe.isEmpty { return }
+
+        for (room, roomId) in roomsToSubscribe {
             do {
                 let timeline = try await getOrCreateTimeline(room: room)
                 let listener = LiveTimelineListener(roomId: roomId, onMessage: onMessage, onRoomUpdate: onRoomUpdate)
                 let handle = await timeline.addListener(listener: listener)
+                subscriptionLock.lock()
                 timelineListenerHandles.append(handle)
+                subscriptionLock.unlock()
+                print("[CapMatrix]   room \(roomId): listener added ✓")
             } catch {
-                print("[CapMatrix] Failed to subscribe to room \(roomId): \(error.localizedDescription)")
+                print("[CapMatrix]   room \(roomId): FAILED: \(error)")
             }
         }
     }
 
     func stopSync() async throws {
         try await syncService?.stop()
+        syncStateHandle = nil
         subscribedRoomIds.removeAll()
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
@@ -260,19 +334,60 @@ class MatrixSDKBridge {
 
     func getRoomMessages(roomId: String, limit: Int, from: String?) async throws -> [String: Any] {
         let room = try requireRoom(roomId: roomId)
-        let timeline = try await room.timeline()
+        let timeline = try await getOrCreateTimeline(room: room)
 
         let collector = TimelineItemCollector(roomId: roomId)
         let handle = await timeline.addListener(listener: collector)
 
-        try await timeline.paginateBackwards(numEvents: UInt16(limit))
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // Wait for the initial Reset snapshot before paginating
+        await collector.waitForUpdate()
+
+        // Paginate backwards — returns true if we hit the start of the timeline
+        let hitStart = try await timeline.paginateBackwards(numEvents: UInt16(limit))
+
+        // If there were new events, wait for the diffs to arrive via the listener
+        if !hitStart {
+            await collector.waitForUpdate()
+        }
 
         handle.cancel()
 
-        let events = collector.events
+        var events = Array(collector.events.suffix(limit))
+
+        // Apply receipt watermark: if any own event has readBy data,
+        // all earlier own events in the timeline are also read.
+        // The SDK only attaches receipts to the specific event they target,
+        // but in Matrix a read receipt implies all prior events are read too.
+        let myUserId = try? client?.userId()
+        var watermarkReadBy: [String]? = nil
+        // Walk backwards (newest first) to find the watermark
+        for i in stride(from: events.count - 1, through: 0, by: -1) {
+            let evt = events[i]
+            let sender = evt["senderId"] as? String
+            if sender == myUserId {
+                if let rb = evt["readBy"] as? [String], !rb.isEmpty {
+                    // Found the watermark — this and all earlier own events are "read"
+                    watermarkReadBy = rb
+                    break
+                }
+            }
+        }
+        // Apply watermark to all earlier own events that don't already have readBy
+        if let watermark = watermarkReadBy {
+            for i in 0..<events.count {
+                let sender = events[i]["senderId"] as? String
+                if sender == myUserId {
+                    let existing = events[i]["readBy"] as? [String]
+                    if existing == nil || existing!.isEmpty {
+                        events[i]["status"] = "read"
+                        events[i]["readBy"] = watermark
+                    }
+                }
+            }
+        }
+
         return [
-            "events": Array(events.suffix(limit)),
+            "events": events,
             "nextBatch": nil as String? as Any
         ]
     }
@@ -280,7 +395,55 @@ class MatrixSDKBridge {
     func markRoomAsRead(roomId: String, eventId: String) async throws {
         let room = try requireRoom(roomId: roomId)
         let timeline = try await getOrCreateTimeline(room: room)
+        print("[CapMatrix] markRoomAsRead: roomId=\(roomId) eventId=\(eventId)")
         try await timeline.markAsRead(receiptType: ReceiptType.read)
+        print("[CapMatrix] markRoomAsRead: done")
+    }
+
+    /// Re-fetch timeline items by event ID and return them with updated receipt status.
+    /// Uses the receipt watermark from the SDK's timeline data.
+    func refreshEventStatuses(roomId: String, eventIds: [String]) async throws -> [[String: Any]] {
+        let room = try requireRoom(roomId: roomId)
+        let timeline = try await getOrCreateTimeline(room: room)
+        let myUserId = try? client?.userId()
+
+        // First pass: collect all events and find the receipt watermark
+        var items: [(id: String, item: EventTimelineItem, serialized: [String: Any])] = []
+        var watermarkReadBy: [String]? = nil
+
+        for eid in eventIds {
+            do {
+                let eventItem = try await timeline.getEventTimelineItemByEventId(eventId: eid)
+                if let serialized = serializeEventTimelineItem(eventItem, roomId: roomId) {
+                    items.append((id: eid, item: eventItem, serialized: serialized))
+                    // Check for receipt watermark on own messages
+                    if eventItem.sender() == myUserId,
+                       let rb = serialized["readBy"] as? [String], !rb.isEmpty {
+                        watermarkReadBy = rb
+                    }
+                }
+            } catch {
+                // skip
+            }
+        }
+
+        // Second pass: apply watermark to all own events
+        var results: [[String: Any]] = []
+        if let watermark = watermarkReadBy {
+            for var entry in items {
+                if entry.serialized["senderId"] as? String == myUserId {
+                    let existing = entry.serialized["readBy"] as? [String]
+                    if existing == nil || existing!.isEmpty {
+                        entry.serialized["status"] = "read"
+                        entry.serialized["readBy"] = watermark
+                    }
+                }
+                results.append(entry.serialized)
+            }
+        } else {
+            results = items.map { $0.serialized }
+        }
+        return results
     }
 
     // MARK: - Redactions & Reactions
@@ -295,10 +458,10 @@ class MatrixSDKBridge {
         let timeline = try await getOrCreateTimeline(room: room)
 
         // toggleReaction needs the timeline item's uniqueId, not the eventId
-        // Collect timeline items to find the one matching our eventId
+        // addListener immediately fires a Reset diff with current items
         let collector = TimelineItemCollector(roomId: roomId)
         let handle = await timeline.addListener(listener: collector)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await collector.waitForUpdate()
         handle.cancel()
 
         guard let uniqueId = collector.uniqueIdForEvent(eventId) else {
@@ -380,7 +543,8 @@ class MatrixSDKBridge {
     // MARK: - Encryption
 
     func initializeCrypto() async throws {
-        guard client != nil else { throw MatrixBridgeError.notLoggedIn }
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        await c.encryption().waitForE2eeInitializationTasks()
     }
 
     func getEncryptionStatus() async throws -> [String: Any] {
@@ -407,7 +571,8 @@ class MatrixSDKBridge {
     }
 
     func bootstrapCrossSigning() async throws {
-        guard client != nil else { throw MatrixBridgeError.notLoggedIn }
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        await c.encryption().waitForE2eeInitializationTasks()
     }
 
     func setupKeyBackup() async throws -> [String: Any] {
@@ -418,9 +583,10 @@ class MatrixSDKBridge {
 
     func getKeyBackupStatus() async throws -> [String: Any] {
         guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        let existsOnServer = try await c.encryption().backupExistsOnServer()
         let state = c.encryption().backupState()
         let enabled = state == .enabled || state == .creating || state == .resuming
-        return ["exists": enabled, "enabled": enabled]
+        return ["exists": existsOnServer, "enabled": enabled]
     }
 
     func restoreKeyBackup(recoveryKey: String?) async throws -> [String: Any] {
@@ -533,7 +699,10 @@ private func extractMediaUrl(source: MediaSource, into contentDict: inout [Strin
 
 private func serializeTimelineItem(_ item: TimelineItem, roomId: String) -> [String: Any]? {
     guard let eventItem = item.asEvent() else { return nil }
+    return serializeEventTimelineItem(eventItem, roomId: roomId)
+}
 
+private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: String) -> [String: Any]? {
     let eventId: String
     if let eid = eventItem.eventId() {
         eventId = eid
@@ -617,8 +786,11 @@ private func serializeTimelineItem(_ item: TimelineItem, roomId: String) -> [Str
     }
 
     var readBy: [String]? = nil
+    let receipts = eventItem.readReceipts()
+    if !receipts.isEmpty {
+        print("[CapMatrix] readReceipts for \(eventId): \(receipts.keys) sender=\(eventItem.sender())")
+    }
     if status == "sent" {
-        let receipts = eventItem.readReceipts()
         let others = receipts.keys.filter { $0 != eventItem.sender() }
         if !others.isEmpty {
             status = "read"
@@ -652,27 +824,37 @@ class LiveTimelineListener: TimelineListener {
     }
 
     func onUpdate(diff: [TimelineDiff]) {
+        print("[CapMatrix] LiveTimelineListener onUpdate for \(roomId): \(diff.count) diffs")
         for d in diff {
-            switch d.change() {
+            let change = d.change()
+            print("[CapMatrix]   diff type: \(change)")
+            switch change {
             case .reset:
-                d.reset()?.forEach { item in
+                let items = d.reset() ?? []
+                print("[CapMatrix]   Reset: \(items.count) items")
+                items.forEach { item in
                     if let event = serializeTimelineItem(item, roomId: roomId) {
+                        print("[CapMatrix]   Reset item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil")")
                         onMessage(event)
                     }
                 }
                 onRoomUpdate(roomId, ["roomId": roomId])
             case .append:
-                d.append()?.forEach { item in
+                let items = d.append() ?? []
+                print("[CapMatrix]   Append: \(items.count) items")
+                items.forEach { item in
                     if let event = serializeTimelineItem(item, roomId: roomId) {
+                        print("[CapMatrix]   Append item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil")")
                         onMessage(event)
                     }
                 }
                 onRoomUpdate(roomId, ["roomId": roomId])
             case .pushBack:
                 if let item = d.pushBack() {
-                    // Skip local echoes — the Set diff will follow with the real EventId
                     let isLocalEcho = item.asEvent()?.eventId() == nil && item.asEvent()?.transactionId() != nil
+                    print("[CapMatrix]   PushBack: localEcho=\(isLocalEcho)")
                     if !isLocalEcho, let event = serializeTimelineItem(item, roomId: roomId) {
+                        print("[CapMatrix]   PushBack item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil")")
                         onMessage(event)
                     }
                     onRoomUpdate(roomId, ["roomId": roomId])
@@ -680,6 +862,7 @@ class LiveTimelineListener: TimelineListener {
             case .pushFront:
                 if let item = d.pushFront() {
                     if let event = serializeTimelineItem(item, roomId: roomId) {
+                        print("[CapMatrix]   PushFront item: \(event["eventId"] ?? "nil")")
                         onMessage(event)
                     }
                     onRoomUpdate(roomId, ["roomId": roomId])
@@ -687,12 +870,19 @@ class LiveTimelineListener: TimelineListener {
             case .set:
                 if let data = d.set() {
                     if let event = serializeTimelineItem(data.item, roomId: roomId) {
+                        print("[CapMatrix]   Set item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil") status=\(event["status"] ?? "nil") readBy=\(event["readBy"] ?? "nil")")
                         onMessage(event)
+                        // If this event has readBy data, trigger roomUpdated
+                        // so the app can refresh receipt status for all messages
+                        if let rb = event["readBy"] as? [String], !rb.isEmpty {
+                            onRoomUpdate(roomId, ["roomId": roomId])
+                        }
                     }
                 }
             case .insert:
                 if let data = d.insert() {
                     if let event = serializeTimelineItem(data.item, roomId: roomId) {
+                        print("[CapMatrix]   Insert item: \(event["eventId"] ?? "nil")")
                         onMessage(event)
                     }
                     onRoomUpdate(roomId, ["roomId": roomId])
@@ -713,9 +903,38 @@ class TimelineItemCollector: TimelineListener {
     private var _events: [[String: Any]] = []
     private var _uniqueIdMap: [String: String] = [:] // eventId -> uniqueId
     private let roomId: String
+    private var _updateContinuation: CheckedContinuation<Void, Never>?
+    private var _updateCount = 0
+    private var _lastWaitedCount = 0
 
     init(roomId: String) {
         self.roomId = roomId
+    }
+
+    /// Waits for the listener to receive at least one update since the last call (or since creation).
+    func waitForUpdate() async {
+        lock.lock()
+        let countBefore = _lastWaitedCount
+        if _updateCount > countBefore {
+            _lastWaitedCount = _updateCount
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        await withCheckedContinuation { cont in
+            lock.lock()
+            if _updateCount > countBefore {
+                _lastWaitedCount = _updateCount
+                lock.unlock()
+                cont.resume()
+            } else {
+                _updateContinuation = cont
+                lock.unlock()
+            }
+        }
+        lock.lock()
+        _lastWaitedCount = _updateCount
+        lock.unlock()
     }
 
     var events: [[String: Any]] {
@@ -731,8 +950,8 @@ class TimelineItemCollector: TimelineListener {
     }
 
     func onUpdate(diff: [TimelineDiff]) {
+        var continuation: CheckedContinuation<Void, Never>?
         lock.lock()
-        defer { lock.unlock() }
         for d in diff {
             switch d.change() {
             case .reset:
@@ -783,6 +1002,11 @@ class TimelineItemCollector: TimelineListener {
                 break
             }
         }
+        _updateCount += 1
+        continuation = _updateContinuation
+        _updateContinuation = nil
+        lock.unlock()
+        continuation?.resume()
     }
 
     private func trackUniqueId(_ item: TimelineItem) {

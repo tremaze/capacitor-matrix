@@ -118,6 +118,38 @@ function updateDebugBtnVisibility() {
 }
 window.addEventListener('resize', updateDebugBtnVisibility);
 
+window.doRegister = async () => {
+  const homeserverUrl = document.getElementById('homeserverUrl').value.trim();
+  const userId = document.getElementById('userId').value.trim();
+  const password = document.getElementById('password').value;
+
+  if (!homeserverUrl || !userId || !password) {
+    return log('Fill in all fields to register', 'error');
+  }
+
+  const localpart = userId.startsWith('@') ? userId.split(':')[0].substring(1) : userId;
+  log(`Registering ${localpart}...`);
+  try {
+    const res = await fetch(`${homeserverUrl}/_matrix/client/v3/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: localpart,
+        password,
+        auth: { type: 'm.login.dummy' },
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      return log(`Register failed: ${data.error || JSON.stringify(data)}`, 'error');
+    }
+    logResult('Registration success', data);
+    log('Now sign in with the same credentials.', 'success');
+  } catch (e) {
+    logError('Register', e);
+  }
+};
+
 window.doLogin = async () => {
   const homeserverUrl = document.getElementById('homeserverUrl').value.trim();
   const userId = document.getElementById('userId').value.trim();
@@ -256,7 +288,6 @@ window.doGetSyncState = async () => {
 
 let roomsLoaded = false;
 let listenersRegistered = false;
-let cryptoChecked = false;
 
 function registerListeners() {
   if (listenersRegistered) return;
@@ -272,15 +303,25 @@ function registerListeners() {
         if (!roomsLoaded) {
           roomsLoaded = true;
         }
-        if (!cryptoChecked) {
-          cryptoChecked = true;
-          setTimeout(() => checkAndPromptCrypto(), 500);
+        break;
+      case 'ERROR': {
+        const err = data.error || 'unknown';
+        if (err.includes('M_UNKNOWN_TOKEN') || err.includes('Unknown access token')) {
+          log('Token invalidated by server — logging out', 'error');
+          setStatus('Not connected');
+          await Matrix.logout().catch(() => {});
+          currentUserId = null;
+          currentRooms = [];
+          selectedRoomId = null;
+          document.getElementById('roomList').innerHTML = '';
+          document.getElementById('loginScreen').classList.remove('hidden');
+          document.getElementById('appShell').classList.remove('active');
+        } else {
+          setStatus('Sync error', 'error');
+          log(`Sync error: ${err}`, 'error');
         }
         break;
-      case 'ERROR':
-        setStatus(`Sync error`, 'error');
-        log(`Sync error: ${data.error || 'unknown'}`, 'error');
-        break;
+      }
       case 'STOPPED':
         setStatus('Sync stopped');
         break;
@@ -350,6 +391,13 @@ function registerListeners() {
       renderMessage(evt);
       const msgList = document.getElementById('messageList');
       msgList.scrollTop = msgList.scrollHeight;
+      // Send read receipt for incoming messages from others
+      if (evt.senderId !== currentUserId && evt.eventId && !evt.eventId.startsWith('~!')) {
+        log(`Sending read receipt for ${evt.eventId}`, 'info');
+        Matrix.markRoomAsRead({ roomId: evt.roomId, eventId: evt.eventId })
+          .then(() => log(`Read receipt sent for ${evt.eventId}`, 'info'))
+          .catch((e) => log(`Failed to send read receipt: ${e?.message || e}`, 'error'));
+      }
     }
     // Refresh room list to update previews/unread counts
     refreshRoomListDebounced();
@@ -358,6 +406,10 @@ function registerListeners() {
   Matrix.addListener('roomUpdated', (data) => {
     log(`Room updated: ${data.roomId}`, 'event');
     refreshRoomListDebounced();
+    // On native platforms, receipt changes come as room updates — refresh own message statuses
+    if (data.roomId === selectedRoomId) {
+      refreshOwnMessageStatuses();
+    }
   });
 
   Matrix.addListener('receiptReceived', (data) => {
@@ -383,9 +435,11 @@ function registerListeners() {
   });
 }
 
+// Resolved by crypto modal when recovery/setup completes or is skipped
+let cryptoModalResolve = null;
+
 async function startSyncAndLoadRooms() {
   roomsLoaded = false;
-  cryptoChecked = false;
   registerListeners();
 
   try {
@@ -393,6 +447,14 @@ async function startSyncAndLoadRooms() {
     log('Crypto initialized', 'success');
   } catch (e) {
     logError('initCrypto', e);
+  }
+
+  // Check crypto and wait for recovery/setup before starting sync
+  // so that decryption keys are available when timelines are created
+  const needsSync = await checkAndPromptCrypto();
+  if (needsSync) {
+    // User was prompted — wait for them to complete or skip
+    await new Promise((resolve) => { cryptoModalResolve = resolve; });
   }
 
   log('Starting sync...');
@@ -417,8 +479,14 @@ function showModal(html) {
 function hideModal() {
   cryptoModal.classList.remove('active');
   cryptoModalContent.innerHTML = '';
+  // Resolve the waiting promise so sync can start
+  if (cryptoModalResolve) {
+    cryptoModalResolve();
+    cryptoModalResolve = null;
+  }
 }
 
+/** Returns true if user needs to interact with crypto modal before sync can start */
 async function checkAndPromptCrypto() {
   try {
     const status = await Matrix.getEncryptionStatus();
@@ -428,16 +496,21 @@ async function checkAndPromptCrypto() {
       const backupStatus = await Matrix.getKeyBackupStatus().catch(() => ({ exists: false }));
       if (backupStatus.exists) {
         showRecoverModal();
+        return true;
       } else {
         showSetupRecoveryModal();
+        return true;
       }
     } else if (!status.isKeyBackupEnabled) {
       showRecoverModal();
+      return true;
     } else {
       log('Encryption set up for this device', 'success');
+      return false;
     }
   } catch (e) {
     logError('cryptoCheck', e);
+    return false;
   }
 }
 
@@ -476,6 +549,15 @@ window.doModalSetupRecovery = async () => {
       logError('setupRecovery', e);
       btn.disabled = false;
       btn.textContent = 'Set Up Encryption';
+      // Show error in modal so it's visible even when debug log is behind the overlay
+      const errEl = document.getElementById('modalError') || (() => {
+        const el = document.createElement('p');
+        el.id = 'modalError';
+        el.style.cssText = 'color:var(--error);font-size:13px;margin:8px 0 0';
+        btn.parentElement.after(el);
+        return el;
+      })();
+      errEl.textContent = e.message || String(e);
     }
   }
 };
@@ -521,7 +603,7 @@ function showRecoverModal() {
     <p>This device isn't verified yet. Enter your recovery key or passphrase to unlock your encrypted messages.</p>
     <div class="step">
       <label><span class="step-num">1</span> Recovery Key or Passphrase</label>
-      <input type="text" id="modalRecoveryInput" placeholder="Enter recovery key or passphrase..." />
+      <input type="text" id="modalRecoveryInput" placeholder="Enter recovery key or passphrase..." autocapitalize="off" autocorrect="off" spellcheck="false" />
     </div>
     <div class="btn-row">
       <button class="modal-btn modal-btn-secondary" onclick="hideModal()">Skip</button>
@@ -549,14 +631,11 @@ window.doModalRecover = async () => {
     }
 
     log('Device verified successfully', 'success');
-    hideModal();
 
     const status = await Matrix.getEncryptionStatus();
     logResult('Encryption status after recovery', status);
 
-    if (selectedRoomId) {
-      try { await loadMessages(selectedRoomId); } catch (_) {}
-    }
+    hideModal();  // This resolves the promise, allowing sync to start
   } catch (e) {
     logError('recover', e);
     showRecoverErrorModal(e.message || String(e));
@@ -1118,6 +1197,16 @@ async function loadConversation() {
       }
     }
     msgList.scrollTop = msgList.scrollHeight;
+    // Send read receipt for the latest message
+    const lastEvent = events[events.length - 1];
+    if (lastEvent?.eventId && !lastEvent.eventId.startsWith('~!')) {
+      log(`Sending read receipt for latest: ${lastEvent.eventId}`, 'info');
+      Matrix.markRoomAsRead({ roomId: selectedRoomId, eventId: lastEvent.eventId })
+        .then(() => log(`Read receipt sent for ${lastEvent.eventId}`, 'info'))
+        .catch((e) => log(`Failed to send read receipt: ${e?.message || e}`, 'error'));
+    }
+    // Refresh read receipt statuses for own messages (needed on iOS where sliding sync doesn't deliver receipts)
+    refreshOwnMessageStatuses();
   } catch (e) {
     msgList.innerHTML = '<div class="msg-system">Error loading messages</div>';
     logError('loadConversation', e);
@@ -1290,6 +1379,32 @@ window.downloadMedia = (el, event) => {
   event.preventDefault();
   if (el.href && el.href !== '#') window.open(el.href);
 };
+
+async function refreshOwnMessageStatuses() {
+  if (!selectedRoomId) return;
+  const ownMsgs = document.querySelectorAll('.msg-group.mine');
+  const eventIds = [];
+  ownMsgs.forEach((el) => {
+    const eid = el.dataset.eventId;
+    if (eid && !eid.startsWith('~!')) {
+      const statusEl = el.querySelector('.msg-status');
+      if (statusEl && !statusEl.classList.contains('read')) {
+        eventIds.push(eid);
+      }
+    }
+  });
+  if (eventIds.length === 0) return;
+  try {
+    const result = await Matrix.refreshEventStatuses({ roomId: selectedRoomId, eventIds });
+    for (const evt of (result.events || [])) {
+      if (evt.status) {
+        updateMsgStatus(evt.eventId, evt.status);
+      }
+    }
+  } catch (e) {
+    // refreshEventStatuses may not be available on all platforms yet
+  }
+}
 
 function updateMsgStatus(eventId, status) {
   const el = document.querySelector(`[data-event-id="${eventId}"]`);
@@ -1645,6 +1760,16 @@ log('Matrix plugin test app loaded');
       await startSyncAndLoadRooms();
     }
   } catch (e) {
-    logError('Session restore', e);
+    const msg = e?.message || String(e);
+    if (msg.includes('M_UNKNOWN_TOKEN') || msg.includes('Unknown access token') || msg.includes('401')) {
+      log('Session expired or token invalid — please log in again', 'error');
+      await Matrix.logout().catch(() => {});
+      currentUserId = null;
+      currentRooms = [];
+      selectedRoomId = null;
+      setStatus('Not connected');
+    } else {
+      logError('Session restore', e);
+    }
   }
 })();

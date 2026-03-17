@@ -171,6 +171,10 @@ export interface MatrixPlugin {
     roomId: string;
     eventId: string;
   }): Promise<void>;
+  refreshEventStatuses(options: {
+    roomId: string;
+    eventIds: string[];
+  }): Promise<{ events: MatrixEvent[] }>;
   redactEvent(options: {
     roomId: string;
     eventId: string;

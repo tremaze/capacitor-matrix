@@ -367,23 +367,35 @@ class MatrixSDKBridge(private val context: Context) {
     suspend fun getRoomMessages(roomId: String, limit: Int?, from: String?): Map<String, Any?> {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
-        // Use a fresh timeline for pagination — NOT the cached one used for sync,
-        // because handle.cancel() below would kill the sync listener too.
-        val timeline = room.timeline()
+        val timeline = getOrCreateTimeline(room)
         val requestedLimit = limit ?: 20
 
         val events = Collections.synchronizedList(mutableListOf<Map<String, Any?>>())
+        val initialSnapshot = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val paginationDone = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val updateCount = java.util.concurrent.atomic.AtomicInteger(0)
 
         val handle = timeline.addListener(object : TimelineListener {
             override fun onUpdate(diff: List<TimelineDiff>) {
                 for (d in diff) {
                     collectEventsFromDiff(d, roomId, events)
                 }
+                val count = updateCount.incrementAndGet()
+                if (count == 1) initialSnapshot.complete(Unit)
+                else paginationDone.complete(Unit)
             }
         })
 
-        timeline.paginateBackwards(requestedLimit.toUShort())
-        delay(500) // Allow listener to process pagination diffs
+        // Wait for initial timeline snapshot
+        initialSnapshot.await()
+
+        // Paginate backwards — returns true if we hit the start of the timeline
+        val hitStart = timeline.paginateBackwards(requestedLimit.toUShort())
+
+        // If there were new events, wait for the diffs to arrive via the listener
+        if (!hitStart && !paginationDone.isCompleted) {
+            paginationDone.await()
+        }
 
         handle.cancel()
 
@@ -397,6 +409,22 @@ class MatrixSDKBridge(private val context: Context) {
         val c = requireClient()
         val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
         getOrCreateTimeline(room).markAsRead(receiptType = ReceiptType.READ)
+    }
+
+    suspend fun refreshEventStatuses(roomId: String, eventIds: List<String>): List<Map<String, Any?>> {
+        val c = requireClient()
+        val room = c.getRoom(roomId) ?: throw IllegalArgumentException("Room $roomId not found")
+        val timeline = getOrCreateTimeline(room)
+        val results = mutableListOf<Map<String, Any?>>()
+        for (eid in eventIds) {
+            try {
+                val eventItem = timeline.getEventTimelineItemByEventId(eid)
+                serializeEventTimelineItem(eventItem, roomId)?.let { results.add(it) }
+            } catch (_: Exception) {
+                // Event may no longer be in timeline; skip
+            }
+        }
+        return results
     }
 
     // ── Redactions & Reactions ─────────────────────────────
@@ -665,7 +693,10 @@ class MatrixSDKBridge(private val context: Context) {
 
     private fun serializeTimelineItem(item: TimelineItem, roomId: String): Map<String, Any?>? {
         val eventItem = item.asEvent() ?: return null
+        return serializeEventTimelineItem(eventItem, roomId)
+    }
 
+    private fun serializeEventTimelineItem(eventItem: EventTimelineItem, roomId: String): Map<String, Any?>? {
         val eventId = when (val id = eventItem.eventOrTransactionId) {
             is EventOrTransactionId.EventId -> id.eventId
             is EventOrTransactionId.TransactionId -> id.transactionId

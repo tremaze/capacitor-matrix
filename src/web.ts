@@ -192,6 +192,21 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       this.notifyListeners('receiptReceived', {
         roomId: room.roomId,
       });
+      // Re-emit own sent messages with updated read status
+      const myUserId = this.client?.getUserId();
+      if (myUserId) {
+        const timeline = room.getLiveTimeline().getEvents();
+        // Walk backwards through recent events; stop after checking a reasonable batch
+        const limit = Math.min(timeline.length, 50);
+        for (let i = timeline.length - 1; i >= timeline.length - limit; i--) {
+          const evt = timeline[i];
+          if (evt.getSender() !== myUserId) continue;
+          const serialized = this.serializeEvent(evt, room.roomId);
+          if (serialized.status === 'read') {
+            this.notifyListeners('messageReceived', { event: serialized });
+          }
+        }
+      }
     });
 
     this.client!.on(RoomEvent.Name, (room: Room) => {
@@ -388,11 +403,34 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async markRoomAsRead(options: { roomId: string; eventId: string }): Promise<void> {
     this.requireClient();
+    const room = this.client!.getRoom(options.roomId);
+    if (room) {
+      const event = room.findEventById(options.eventId);
+      if (event) {
+        await this.client!.sendReadReceipt(event);
+        return;
+      }
+    }
+    // Fallback to HTTP request if event not found locally
     await this.client!.setRoomReadMarkersHttpRequest(
       options.roomId,
       options.eventId,
       options.eventId,
     );
+  }
+
+  async refreshEventStatuses(options: { roomId: string; eventIds: string[] }): Promise<{ events: import('./definitions').MatrixEvent[] }> {
+    this.requireClient();
+    const room = this.client!.getRoom(options.roomId);
+    if (!room) return { events: [] };
+    const events: import('./definitions').MatrixEvent[] = [];
+    for (const eid of options.eventIds) {
+      const event = room.findEventById(eid);
+      if (event) {
+        events.push(this.serializeEvent(event, options.roomId));
+      }
+    }
+    return { events };
   }
 
   // ── Redactions & Reactions ───────────────────────────────
@@ -519,7 +557,11 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async initializeCrypto(): Promise<void> {
     this.requireClient();
-    await this.client!.initRustCrypto();
+    const userId = this.client!.getUserId();
+    const deviceId = this.client!.getDeviceId();
+    await this.client!.initRustCrypto({
+      cryptoDatabasePrefix: `matrix-js-sdk/${userId}/${deviceId}`,
+    });
   }
 
   async getEncryptionStatus(): Promise<EncryptionStatus> {
@@ -559,8 +601,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   }
 
   async bootstrapCrossSigning(): Promise<void> {
-    this.requireClient();
-    const crypto = this.requireCrypto();
+    const crypto = await this.ensureCrypto();
     await crypto.bootstrapCrossSigning({
       setupNewCrossSigning: true,
       authUploadDeviceSigningKeys: async (makeRequest) => {
@@ -580,8 +621,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   }
 
   async setupKeyBackup(): Promise<KeyBackupStatus> {
-    this.requireClient();
-    const crypto = this.requireCrypto();
+    const crypto = await this.ensureCrypto();
     await crypto.resetKeyBackup();
     const version = await crypto.getActiveSessionBackupVersion();
     return { exists: true, version: version ?? undefined, enabled: true };
@@ -607,8 +647,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   }
 
   async setupRecovery(options?: { passphrase?: string }): Promise<RecoveryKeyInfo> {
-    this.requireClient();
-    const crypto = this.requireCrypto();
+    const crypto = await this.ensureCrypto();
 
     const keyInfo = await crypto.createRecoveryKeyFromPassphrase(options?.passphrase);
     this.secretStorageKey = keyInfo.privateKey;
@@ -623,15 +662,13 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   }
 
   async isRecoveryEnabled(): Promise<{ enabled: boolean }> {
-    this.requireClient();
-    const crypto = this.requireCrypto();
+    const crypto = await this.ensureCrypto();
     const ready = await crypto.isSecretStorageReady();
     return { enabled: ready };
   }
 
   async recoverAndSetup(options: { recoveryKey?: string; passphrase?: string }): Promise<void> {
-    this.requireClient();
-    const crypto = this.requireCrypto();
+    const crypto = await this.ensureCrypto();
 
     // Derive/decode the secret storage key
     if (options.recoveryKey) {
@@ -696,6 +733,14 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       throw new Error('Crypto not initialized. Call initializeCrypto() first.');
     }
     return crypto;
+  }
+
+  private async ensureCrypto() {
+    this.requireClient();
+    if (!this.client!.getCrypto()) {
+      await this.initializeCrypto();
+    }
+    return this.requireCrypto();
   }
 
   private persistSession(session: SessionInfo): void {
