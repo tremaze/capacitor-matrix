@@ -277,6 +277,12 @@ await Matrix.addListener('roomUpdated', ({ roomId, summary }) => {
   console.log(`Room ${summary.name} updated`);
 });
 
+// Read receipt updates (fires when another user reads messages in a room)
+await Matrix.addListener('receiptReceived', ({ roomId }) => {
+  console.log(`New read receipt in ${roomId}`);
+  // Refresh message statuses to update read indicators
+});
+
 // Clean up all listeners
 await Matrix.removeAllListeners();
 ```
@@ -288,6 +294,15 @@ await Matrix.removeAllListeners();
 await Matrix.markRoomAsRead({
   roomId: '!abc:example.com',
   eventId: '$latestEvent',
+});
+
+// Refresh read statuses for specific messages (useful after receiving a receiptReceived event)
+const { events } = await Matrix.refreshEventStatuses({
+  roomId: '!abc:example.com',
+  eventIds: ['$event1', '$event2'],
+});
+events.forEach((evt) => {
+  console.log(`${evt.eventId}: ${evt.status}`, evt.readBy);
 });
 ```
 
@@ -342,6 +357,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`addListener('messageReceived', ...)`](#addlistenermessagereceived-)
 * [`addListener('roomUpdated', ...)`](#addlistenerroomupdated-)
 * [`addListener('typingChanged', ...)`](#addlistenertypingchanged-)
+* [`addListener('receiptReceived', ...)`](#addlistenerreceiptreceived-)
 * [`removeAllListeners()`](#removealllisteners)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
@@ -948,6 +964,22 @@ addListener(event: 'typingChanged', listenerFunc: (data: TypingEvent) => void) =
 --------------------
 
 
+### addListener('receiptReceived', ...)
+
+```typescript
+addListener(event: 'receiptReceived', listenerFunc: (data: ReceiptReceivedEvent) => void) => Promise<PluginListenerHandle>
+```
+
+| Param              | Type                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| **`event`**        | <code>'receiptReceived'</code>                                                           |
+| **`listenerFunc`** | <code>(data: <a href="#receiptreceivedevent">ReceiptReceivedEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
 ### removeAllListeners()
 
 ```typescript
@@ -1130,6 +1162,13 @@ removeAllListeners() => Promise<void>
 | ------------- | --------------------- |
 | **`roomId`**  | <code>string</code>   |
 | **`userIds`** | <code>string[]</code> |
+
+
+#### ReceiptReceivedEvent
+
+| Prop         | Type                |
+| ------------ | ------------------- |
+| **`roomId`** | <code>string</code> |
 
 
 ### Type Aliases

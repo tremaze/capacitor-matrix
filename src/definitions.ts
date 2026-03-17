@@ -49,6 +49,10 @@ export interface TypingEvent {
   userIds: string[];
 }
 
+export interface ReceiptReceivedEvent {
+  roomId: string;
+}
+
 export interface MatrixEvent {
   eventId: string;
   roomId: string;
@@ -261,6 +265,10 @@ export interface MatrixPlugin {
   addListener(
     event: 'typingChanged',
     listenerFunc: (data: TypingEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    event: 'receiptReceived',
+    listenerFunc: (data: ReceiptReceivedEvent) => void,
   ): Promise<PluginListenerHandle>;
   removeAllListeners(): Promise<void>;
 }
