@@ -1054,6 +1054,7 @@ function selectRoom(room) {
 }
 
 window.goBackToRooms = () => {
+  selectedRoomId = null;
   document.getElementById('sidebar').classList.remove('room-open');
   document.getElementById('chatArea').classList.remove('room-open');
 };

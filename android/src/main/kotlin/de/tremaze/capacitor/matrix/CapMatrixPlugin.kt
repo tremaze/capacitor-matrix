@@ -114,6 +114,13 @@ class MatrixPlugin : Plugin() {
                             JSObject().put("roomId", roomId).put("summary", mapToJSObject(summary)),
                         )
                     },
+                    onReceipt = { roomId ->
+                        android.util.Log.d("CapMatrix", "onReceipt callback fired for room=$roomId, notifying JS")
+                        notifyListeners(
+                            "receiptReceived",
+                            JSObject().put("roomId", roomId),
+                        )
+                    },
                 )
                 call.resolve()
             } catch (e: Exception) {

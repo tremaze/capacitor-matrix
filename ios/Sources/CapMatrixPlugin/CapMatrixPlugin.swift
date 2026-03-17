@@ -135,6 +135,11 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
                         DispatchQueue.main.async {
                             self?.notifyListeners("roomUpdated", data: ["roomId": roomId, "summary": summary])
                         }
+                    },
+                    onReceipt: { [weak self] roomId in
+                        DispatchQueue.main.async {
+                            self?.notifyListeners("receiptReceived", data: ["roomId": roomId])
+                        }
                     }
                 )
                 call.resolve()

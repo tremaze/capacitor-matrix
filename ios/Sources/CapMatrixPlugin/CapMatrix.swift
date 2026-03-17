@@ -29,6 +29,7 @@ class MatrixSDKBridge {
     private var syncStateHandle: TaskHandle?
     private var syncStateObserver: SyncStateObserverProxy?
     private let subscriptionLock = NSLock()
+    private var receiptSyncTask: Task<Void, Never>?
 
     // MARK: - Auth
 
@@ -47,10 +48,11 @@ class MatrixSDKBridge {
 
     private func _login(homeserverUrl: String, userId: String, password: String) async throws -> [String: String] {
         let dataDir = Self.dataDirectory()
+        let cacheDir = Self.cacheDirectory()
 
         let newClient = try await ClientBuilder()
             .homeserverUrl(url: homeserverUrl)
-            .sessionPaths(dataPath: dataDir, cachePath: dataDir)
+            .sessionPaths(dataPath: dataDir, cachePath: cacheDir)
             .slidingSyncVersionBuilder(versionBuilder: .native)
             .autoEnableCrossSigning(autoEnableCrossSigning: true)
             .build()
@@ -90,10 +92,11 @@ class MatrixSDKBridge {
 
     private func _loginWithToken(homeserverUrl: String, accessToken: String, userId: String, deviceId: String) async throws -> [String: String] {
         let dataDir = Self.dataDirectory()
+        let cacheDir = Self.cacheDirectory()
 
         let newClient = try await ClientBuilder()
             .homeserverUrl(url: homeserverUrl)
-            .sessionPaths(dataPath: dataDir, cachePath: dataDir)
+            .sessionPaths(dataPath: dataDir, cachePath: cacheDir)
             .slidingSyncVersionBuilder(versionBuilder: .native)
             .autoEnableCrossSigning(autoEnableCrossSigning: true)
             .build()
@@ -122,6 +125,8 @@ class MatrixSDKBridge {
     }
 
     func logout() async throws {
+        receiptSyncTask?.cancel()
+        receiptSyncTask = nil
         try await syncService?.stop()
         syncService = nil
         syncStateHandle = nil
@@ -144,6 +149,9 @@ class MatrixSDKBridge {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("matrix_sdk")
         try? FileManager.default.removeItem(at: dir)
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("matrix_sdk_cache")
+        try? FileManager.default.removeItem(at: cacheDir)
     }
 
     func getSession() -> [String: String]? {
@@ -155,7 +163,8 @@ class MatrixSDKBridge {
     func startSync(
         onSyncState: @escaping (String) -> Void,
         onMessage: @escaping ([String: Any]) -> Void,
-        onRoomUpdate: @escaping (String, [String: Any]) -> Void
+        onRoomUpdate: @escaping (String, [String: Any]) -> Void,
+        onReceipt: @escaping (String) -> Void
     ) async throws {
         guard let c = client else {
             throw MatrixBridgeError.notLoggedIn
@@ -192,6 +201,219 @@ class MatrixSDKBridge {
             print("[CapMatrix] startSync: calling service.start()...")
             await service?.start()
             print("[CapMatrix] startSync: service.start() returned")
+        }
+
+        // Start a parallel v2 sync connection that only listens for m.receipt
+        // ephemeral events. Tuwunel's sliding sync doesn't deliver other users'
+        // read receipts, so this provides live receipt updates.
+        startReceiptSync(onReceipt: onReceipt)
+    }
+
+    /// Runs a lightweight v2 sync loop that only subscribes to m.receipt
+    /// ephemeral events. The Rust SDK receives receipts via sliding sync
+    /// but doesn't expose them through readReceipts() on timeline items,
+    /// so this parallel connection provides live receipt updates.
+    private func startReceiptSync(onReceipt: @escaping (String) -> Void) {
+        guard let session = sessionStore.load() else { return }
+
+        receiptSyncTask?.cancel()
+        receiptSyncTask = Task.detached {
+            let baseUrl = session.homeserverUrl.hasSuffix("/")
+                ? String(session.homeserverUrl.dropLast())
+                : session.homeserverUrl
+            let token = session.accessToken
+            let userId = session.userId
+
+            print("[CapMatrix] receiptSync: starting, uploading filter...")
+
+            // Upload filter first — some servers reject inline JSON filters
+            let filterId = await Self.uploadSyncFilter(
+                baseUrl: baseUrl, accessToken: token, userId: userId
+            )
+            print("[CapMatrix] receiptSync: filterId=\(filterId ?? "nil")")
+
+            var since: String? = nil
+
+            // Try both v3 and r0 API versions
+            let apiPaths = ["/_matrix/client/v3/sync", "/_matrix/client/r0/sync"]
+            var workingPath: String? = nil
+
+            for apiPath in apiPaths {
+                if Task.isCancelled { return }
+
+                let testUrl = Self.buildSyncUrl(
+                    baseUrl: baseUrl, apiPath: apiPath,
+                    filterId: filterId, since: nil, timeout: 0
+                )
+                guard let url = testUrl else { continue }
+
+                var request = URLRequest(url: url)
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                request.timeoutInterval = 30
+
+                do {
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+
+                    if statusCode == 200 {
+                        workingPath = apiPath
+                        // Extract since token from first response
+                        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let nextBatch = json["next_batch"] as? String {
+                            since = nextBatch
+                        }
+                        // Process any receipts in the initial response
+                        Self.processReceiptResponse(data: data, onReceipt: onReceipt)
+                        print("[CapMatrix] receiptSync: \(apiPath) works, since=\(since ?? "nil")")
+                        break
+                    } else {
+                        let body = String(data: data, encoding: .utf8) ?? "(no body)"
+                        print("[CapMatrix] receiptSync: \(apiPath) returned HTTP \(statusCode): \(body.prefix(500))")
+                    }
+                } catch {
+                    print("[CapMatrix] receiptSync: \(apiPath) failed: \(error)")
+                }
+            }
+
+            guard let apiPath = workingPath else {
+                print("[CapMatrix] receiptSync: no working sync endpoint found, giving up")
+                return
+            }
+
+            print("[CapMatrix] receiptSync: entering long-poll loop on \(apiPath)")
+
+            while !Task.isCancelled {
+                let syncUrl = Self.buildSyncUrl(
+                    baseUrl: baseUrl, apiPath: apiPath,
+                    filterId: filterId, since: since, timeout: 30000
+                )
+                guard let url = syncUrl else {
+                    print("[CapMatrix] receiptSync: invalid URL")
+                    return
+                }
+
+                var request = URLRequest(url: url)
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                request.timeoutInterval = 60
+
+                do {
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+
+                    guard statusCode == 200 else {
+                        let body = String(data: data, encoding: .utf8) ?? ""
+                        print("[CapMatrix] receiptSync: HTTP \(statusCode): \(body.prefix(300))")
+                        // Back off on error, but not too long
+                        try await Task.sleep(nanoseconds: 5_000_000_000)
+                        continue
+                    }
+
+                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let nextBatch = json["next_batch"] as? String {
+                        since = nextBatch
+                    }
+
+                    Self.processReceiptResponse(data: data, onReceipt: onReceipt)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    print("[CapMatrix] receiptSync: error: \(error)")
+                    if !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    }
+                }
+            }
+            print("[CapMatrix] receiptSync: loop ended")
+        }
+    }
+
+    /// Upload a sync filter that only subscribes to m.receipt ephemeral events.
+    /// Returns the filter ID, or nil if upload fails.
+    private static func uploadSyncFilter(
+        baseUrl: String, accessToken: String, userId: String
+    ) async -> String? {
+        let encodedUserId = userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userId
+        let urlStr = "\(baseUrl)/_matrix/client/v3/user/\(encodedUserId)/filter"
+        guard let url = URL(string: urlStr) else { return nil }
+
+        let filterJson: [String: Any] = [
+            "room": [
+                "timeline": ["limit": 0],
+                "state": ["types": [] as [String]],
+                "ephemeral": ["types": ["m.receipt"]]
+            ],
+            "presence": ["types": [] as [String]]
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: filterJson) else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        request.timeoutInterval = 15
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let filterId = json["filter_id"] as? String {
+                return filterId
+            }
+            let respBody = String(data: data, encoding: .utf8) ?? ""
+            print("[CapMatrix] receiptSync: filter upload HTTP \(statusCode): \(respBody.prefix(300))")
+            return nil
+        } catch {
+            print("[CapMatrix] receiptSync: filter upload failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Build a sync URL using URLComponents for correct encoding.
+    private static func buildSyncUrl(
+        baseUrl: String, apiPath: String,
+        filterId: String?, since: String?, timeout: Int
+    ) -> URL? {
+        var components = URLComponents(string: "\(baseUrl)\(apiPath)")
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "timeout", value: "\(timeout)")
+        ]
+        if let fid = filterId {
+            queryItems.append(URLQueryItem(name: "filter", value: fid))
+        } else {
+            // Inline filter as fallback
+            let inlineFilter = #"{"room":{"timeline":{"limit":0},"state":{"types":[]},"ephemeral":{"types":["m.receipt"]}},"presence":{"types":[]}}"#
+            queryItems.append(URLQueryItem(name: "filter", value: inlineFilter))
+        }
+        if let s = since {
+            queryItems.append(URLQueryItem(name: "since", value: s))
+        }
+        components?.queryItems = queryItems
+        return components?.url
+    }
+
+    /// Parse receipt events from a v2 sync response and fire callbacks.
+    private static func processReceiptResponse(
+        data: Data, onReceipt: @escaping (String) -> Void
+    ) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rooms = (json["rooms"] as? [String: Any])?["join"] as? [String: Any] else {
+            return
+        }
+        for (roomId, roomData) in rooms {
+            guard let roomDict = roomData as? [String: Any],
+                  let ephemeral = roomDict["ephemeral"] as? [String: Any],
+                  let events = ephemeral["events"] as? [[String: Any]] else {
+                continue
+            }
+            for event in events {
+                guard (event["type"] as? String) == "m.receipt" else { continue }
+                print("[CapMatrix] receiptSync: receipt in \(roomId)")
+                onReceipt(roomId)
+            }
         }
     }
 
@@ -237,6 +459,8 @@ class MatrixSDKBridge {
         subscribedRoomIds.removeAll()
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
+        receiptSyncTask?.cancel()
+        receiptSyncTask = nil
     }
 
     func getSyncState() -> String {
@@ -340,14 +564,19 @@ class MatrixSDKBridge {
         let handle = await timeline.addListener(listener: collector)
 
         // Wait for the initial Reset snapshot before paginating
-        await collector.waitForUpdate()
+        let gotInitial = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+        print("[CapMatrix] getRoomMessages: initial snapshot: \(collector.events.count) items, gotInitial=\(gotInitial)")
 
-        // Paginate backwards — returns true if we hit the start of the timeline
-        let hitStart = try await timeline.paginateBackwards(numEvents: UInt16(limit))
+        // Only paginate if we don't have enough items yet
+        if collector.events.count < limit {
+            let hitStart = try await timeline.paginateBackwards(numEvents: UInt16(limit))
+            print("[CapMatrix] getRoomMessages: paginated, hitStart=\(hitStart)")
 
-        // If there were new events, wait for the diffs to arrive via the listener
-        if !hitStart {
-            await collector.waitForUpdate()
+            // If there were new events, wait for the diffs to arrive via the listener
+            if !hitStart {
+                _ = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+            }
+            print("[CapMatrix] getRoomMessages: after pagination: \(collector.events.count) items")
         }
 
         handle.cancel()
@@ -358,23 +587,25 @@ class MatrixSDKBridge {
         // all earlier own events in the timeline are also read.
         // The SDK only attaches receipts to the specific event they target,
         // but in Matrix a read receipt implies all prior events are read too.
-        let myUserId = try? client?.userId()
+        // Only events BEFORE the watermark are marked — events after it are unread.
+        let myUserId = client.flatMap({ try? $0.userId() })
         var watermarkReadBy: [String]? = nil
-        // Walk backwards (newest first) to find the watermark
+        var watermarkIndex = -1
+        // Walk backwards (newest first) to find the newest own event with a receipt
         for i in stride(from: events.count - 1, through: 0, by: -1) {
             let evt = events[i]
             let sender = evt["senderId"] as? String
             if sender == myUserId {
                 if let rb = evt["readBy"] as? [String], !rb.isEmpty {
-                    // Found the watermark — this and all earlier own events are "read"
                     watermarkReadBy = rb
+                    watermarkIndex = i
                     break
                 }
             }
         }
-        // Apply watermark to all earlier own events that don't already have readBy
-        if let watermark = watermarkReadBy {
-            for i in 0..<events.count {
+        // Apply watermark only to own events BEFORE the watermark (older)
+        if let watermark = watermarkReadBy, watermarkIndex >= 0 {
+            for i in 0..<watermarkIndex {
                 let sender = events[i]["senderId"] as? String
                 if sender == myUserId {
                     let existing = events[i]["readBy"] as? [String]
@@ -405,40 +636,48 @@ class MatrixSDKBridge {
     func refreshEventStatuses(roomId: String, eventIds: [String]) async throws -> [[String: Any]] {
         let room = try requireRoom(roomId: roomId)
         let timeline = try await getOrCreateTimeline(room: room)
-        let myUserId = try? client?.userId()
+        let myUserId = client.flatMap({ try? $0.userId() })
 
-        // First pass: collect all events and find the receipt watermark
+        // Collect all events
         var items: [(id: String, item: EventTimelineItem, serialized: [String: Any])] = []
-        var watermarkReadBy: [String]? = nil
 
         for eid in eventIds {
             do {
                 let eventItem = try await timeline.getEventTimelineItemByEventId(eventId: eid)
                 if let serialized = serializeEventTimelineItem(eventItem, roomId: roomId) {
                     items.append((id: eid, item: eventItem, serialized: serialized))
-                    // Check for receipt watermark on own messages
-                    if eventItem.sender() == myUserId,
-                       let rb = serialized["readBy"] as? [String], !rb.isEmpty {
-                        watermarkReadBy = rb
-                    }
                 }
             } catch {
                 // skip
             }
         }
 
-        // Second pass: apply watermark to all own events
+        // Find the newest own event with a read receipt (watermark)
+        var watermarkReadBy: [String]? = nil
+        var watermarkIndex = -1
+        for i in stride(from: items.count - 1, through: 0, by: -1) {
+            if items[i].serialized["senderId"] as? String == myUserId,
+               let rb = items[i].serialized["readBy"] as? [String], !rb.isEmpty {
+                watermarkReadBy = rb
+                watermarkIndex = i
+                break
+            }
+        }
+
+        // Apply watermark only to own events BEFORE the watermark (older)
         var results: [[String: Any]] = []
-        if let watermark = watermarkReadBy {
-            for var entry in items {
-                if entry.serialized["senderId"] as? String == myUserId {
-                    let existing = entry.serialized["readBy"] as? [String]
+        if let watermark = watermarkReadBy, watermarkIndex >= 0 {
+            for i in 0..<items.count {
+                var serialized = items[i].serialized
+                if i < watermarkIndex,
+                   serialized["senderId"] as? String == myUserId {
+                    let existing = serialized["readBy"] as? [String]
                     if existing == nil || existing!.isEmpty {
-                        entry.serialized["status"] = "read"
-                        entry.serialized["readBy"] = watermark
+                        serialized["status"] = "read"
+                        serialized["readBy"] = watermark
                     }
                 }
-                results.append(entry.serialized)
+                results.append(serialized)
             }
         } else {
             results = items.map { $0.serialized }
@@ -636,6 +875,18 @@ class MatrixSDKBridge {
     private static func dataDirectory() -> String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("matrix_sdk")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.path
+    }
+
+    /// Separate cache directory for sliding sync state.
+    /// Cleared on each login/restore to force a fresh sync, working around
+    /// Tuwunel returning stale events when resuming from a cached sync position.
+    private static func cacheDirectory() -> String {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("matrix_sdk_cache")
+        // Clear stale sync cache on each startup
+        try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.path
     }
@@ -898,12 +1149,17 @@ class LiveTimelineListener: TimelineListener {
 
 // MARK: - Timeline Item Collector (for pagination/one-shot reads)
 
+/// Mirrors the SDK's full timeline (including virtual/nil items) so that
+/// index-based diffs (Insert, Remove, Set) stay correct. The public `events`
+/// property filters out nils to return only real event items.
 class TimelineItemCollector: TimelineListener {
     private let lock = NSLock()
-    private var _events: [[String: Any]] = []
+    // Full mirror of the SDK timeline — nil entries represent virtual items
+    // (day separators, read markers, etc.) that serializeTimelineItem skips.
+    private var _items: [[String: Any]?] = []
     private var _uniqueIdMap: [String: String] = [:] // eventId -> uniqueId
     private let roomId: String
-    private var _updateContinuation: CheckedContinuation<Void, Never>?
+    private var _updateContinuation: CheckedContinuation<Bool, Never>?
     private var _updateCount = 0
     private var _lastWaitedCount = 0
 
@@ -912,35 +1168,61 @@ class TimelineItemCollector: TimelineListener {
     }
 
     /// Waits for the listener to receive at least one update since the last call (or since creation).
-    func waitForUpdate() async {
+    /// Returns true if an update was received, false if the timeout was hit.
+    @discardableResult
+    func waitForUpdate(timeoutNanos: UInt64 = 0) async -> Bool {
         lock.lock()
         let countBefore = _lastWaitedCount
         if _updateCount > countBefore {
             _lastWaitedCount = _updateCount
             lock.unlock()
-            return
+            return true
         }
         lock.unlock()
-        await withCheckedContinuation { cont in
-            lock.lock()
-            if _updateCount > countBefore {
-                _lastWaitedCount = _updateCount
-                lock.unlock()
-                cont.resume()
-            } else {
-                _updateContinuation = cont
-                lock.unlock()
+
+        // Race between the update arriving and an optional timeout
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                    self.lock.lock()
+                    if self._updateCount > countBefore {
+                        self._lastWaitedCount = self._updateCount
+                        self.lock.unlock()
+                        cont.resume(returning: true)
+                    } else {
+                        self._updateContinuation = cont
+                        self.lock.unlock()
+                    }
+                }
             }
+            if timeoutNanos > 0 {
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: timeoutNanos)
+                    return false
+                }
+            }
+            let result = await group.next() ?? false
+            if !result {
+                // Timeout won — clear and resume the pending continuation
+                self.lock.lock()
+                let pending = self._updateContinuation
+                self._updateContinuation = nil
+                self.lock.unlock()
+                pending?.resume(returning: false)
+            }
+            group.cancelAll()
+            self.lock.lock()
+            self._lastWaitedCount = self._updateCount
+            self.lock.unlock()
+            return result
         }
-        lock.lock()
-        _lastWaitedCount = _updateCount
-        lock.unlock()
     }
 
+    /// Returns only the non-nil (real event) items, in timeline order.
     var events: [[String: Any]] {
         lock.lock()
         defer { lock.unlock() }
-        return _events
+        return _items.compactMap { $0 }
     }
 
     func uniqueIdForEvent(_ eventId: String) -> String? {
@@ -950,54 +1232,49 @@ class TimelineItemCollector: TimelineListener {
     }
 
     func onUpdate(diff: [TimelineDiff]) {
-        var continuation: CheckedContinuation<Void, Never>?
+        var continuation: CheckedContinuation<Bool, Never>?
         lock.lock()
         for d in diff {
             switch d.change() {
             case .reset:
-                _events.removeAll()
+                _items.removeAll()
                 _uniqueIdMap.removeAll()
                 d.reset()?.forEach { item in
                     trackUniqueId(item)
-                    if let event = serializeTimelineItem(item, roomId: roomId) {
-                        _events.append(event)
-                    }
+                    _items.append(serializeTimelineItem(item, roomId: roomId))
                 }
             case .append:
                 d.append()?.forEach { item in
                     trackUniqueId(item)
-                    if let event = serializeTimelineItem(item, roomId: roomId) {
-                        _events.append(event)
-                    }
+                    _items.append(serializeTimelineItem(item, roomId: roomId))
                 }
             case .pushBack:
                 if let item = d.pushBack() {
                     trackUniqueId(item)
-                    if let event = serializeTimelineItem(item, roomId: roomId) {
-                        _events.append(event)
-                    }
+                    _items.append(serializeTimelineItem(item, roomId: roomId))
                 }
             case .pushFront:
                 if let item = d.pushFront() {
                     trackUniqueId(item)
-                    if let event = serializeTimelineItem(item, roomId: roomId) {
-                        _events.insert(event, at: 0)
-                    }
+                    _items.insert(serializeTimelineItem(item, roomId: roomId), at: 0)
                 }
             case .set:
                 if let data = d.set() {
                     trackUniqueId(data.item)
-                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
-                        _events.append(event)
+                    let idx = Int(data.index)
+                    if idx >= 0 && idx < _items.count {
+                        _items[idx] = serializeTimelineItem(data.item, roomId: roomId)
                     }
                 }
             case .insert:
                 if let data = d.insert() {
                     trackUniqueId(data.item)
-                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
-                        _events.append(event)
-                    }
+                    let idx = min(Int(data.index), _items.count)
+                    _items.insert(serializeTimelineItem(data.item, roomId: roomId), at: idx)
                 }
+            case .clear:
+                _items.removeAll()
+                _uniqueIdMap.removeAll()
             default:
                 break
             }
@@ -1006,7 +1283,7 @@ class TimelineItemCollector: TimelineListener {
         continuation = _updateContinuation
         _updateContinuation = nil
         lock.unlock()
-        continuation?.resume()
+        continuation?.resume(returning: true)
     }
 
     private func trackUniqueId(_ item: TimelineItem) {
