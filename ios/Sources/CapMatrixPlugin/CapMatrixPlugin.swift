@@ -47,6 +47,15 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setPresence", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getPresence", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "refreshEventStatuses", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "forgetRoom", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "editMessage", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sendReply", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setRoomAvatar", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "uploadContent", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getThumbnailUrl", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getDevices", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "deleteDevice", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setPusher", returnType: CAPPluginReturnPromise),
     ]
 
     private let matrixBridge = MatrixSDKBridge()
@@ -292,6 +301,8 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         let topic = call.getString("topic")
         let isEncrypted = call.getBool("isEncrypted") ?? false
         let invite = call.getArray("invite") as? [String]
+        let isDirect = call.getBool("isDirect") ?? false
+        let preset = call.getString("preset")
 
         Task {
             do {
@@ -299,7 +310,9 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
                     name: name,
                     topic: topic,
                     isEncrypted: isEncrypted,
-                    invite: invite
+                    isDirect: isDirect,
+                    invite: invite,
+                    preset: preset
                 )
                 call.resolve(["roomId": roomId])
             } catch {
@@ -641,5 +654,127 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func getPresence(_ call: CAPPluginCall) {
         call.reject("getPresence is not supported on this platform")
+    }
+
+    @objc func forgetRoom(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId") else {
+            return call.reject("Missing roomId")
+        }
+
+        Task {
+            do {
+                try await matrixBridge.forgetRoom(roomId: roomId)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func editMessage(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let eventId = call.getString("eventId"),
+              let newBody = call.getString("newBody") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                let resultEventId = try await matrixBridge.editMessage(roomId: roomId, eventId: eventId, newBody: newBody)
+                call.resolve(["eventId": resultEventId])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func sendReply(_ call: CAPPluginCall) {
+        guard let roomId = call.getString("roomId"),
+              let body = call.getString("body"),
+              let replyToEventId = call.getString("replyToEventId") else {
+            return call.reject("Missing required parameters")
+        }
+        let msgtype = call.getString("msgtype") ?? "m.text"
+
+        Task {
+            do {
+                let resultEventId = try await matrixBridge.sendReply(roomId: roomId, body: body, replyToEventId: replyToEventId, msgtype: msgtype)
+                call.resolve(["eventId": resultEventId])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func setRoomAvatar(_ call: CAPPluginCall) {
+        guard let _ = call.getString("roomId"),
+              let _ = call.getString("mxcUrl") else {
+            return call.reject("Missing required parameters")
+        }
+        // No-op placeholder: Rust SDK doesn't have direct setAvatar
+        call.resolve()
+    }
+
+    @objc func uploadContent(_ call: CAPPluginCall) {
+        guard let fileUri = call.getString("fileUri"),
+              let fileName = call.getString("fileName"),
+              let mimeType = call.getString("mimeType") else {
+            return call.reject("Missing required parameters")
+        }
+
+        Task {
+            do {
+                let contentUri = try await matrixBridge.uploadContent(fileUri: fileUri, fileName: fileName, mimeType: mimeType)
+                call.resolve(["contentUri": contentUri])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func getThumbnailUrl(_ call: CAPPluginCall) {
+        guard let mxcUrl = call.getString("mxcUrl") else {
+            return call.reject("Missing mxcUrl")
+        }
+        let width = call.getInt("width") ?? 320
+        let height = call.getInt("height") ?? 240
+        let method = call.getString("method") ?? "scale"
+
+        do {
+            let url = try matrixBridge.getThumbnailUrl(mxcUrl: mxcUrl, width: width, height: height, method: method)
+            call.resolve(["url": url])
+        } catch {
+            call.reject(error.localizedDescription)
+        }
+    }
+
+    @objc func getDevices(_ call: CAPPluginCall) {
+        Task {
+            do {
+                let devices = try await matrixBridge.getDevices()
+                call.resolve(["devices": devices])
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func deleteDevice(_ call: CAPPluginCall) {
+        guard let deviceId = call.getString("deviceId") else {
+            return call.reject("Missing deviceId")
+        }
+
+        Task {
+            do {
+                try await matrixBridge.deleteDevice(deviceId: deviceId)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func setPusher(_ call: CAPPluginCall) {
+        call.reject("setPusher is not yet supported")
     }
 }

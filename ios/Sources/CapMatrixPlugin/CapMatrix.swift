@@ -510,7 +510,8 @@ class MatrixSDKBridge {
                 result.append([
                     "userId": member.userId,
                     "displayName": member.displayName as Any,
-                    "membership": String(describing: member.membership).lowercased()
+                    "membership": String(describing: member.membership).lowercased(),
+                    "avatarUrl": member.avatarUrl as Any,
                 ])
             }
         }
@@ -530,17 +531,32 @@ class MatrixSDKBridge {
         try await room.leave()
     }
 
-    func createRoom(name: String?, topic: String?, isEncrypted: Bool, invite: [String]?) async throws -> String {
+    func forgetRoom(roomId: String) async throws {
+        // The Rust SDK doesn't have a dedicated forget method on the Room type.
+        // After leaving, the room is removed from the room list on next sync.
+        // This is a no-op placeholder for API compatibility.
+    }
+
+    func createRoom(name: String?, topic: String?, isEncrypted: Bool, isDirect: Bool = false, invite: [String]?, preset: String? = nil) async throws -> String {
         guard let c = client else {
             throw MatrixBridgeError.notLoggedIn
+        }
+        let roomPreset: RoomPreset
+        switch preset {
+        case "trusted_private_chat":
+            roomPreset = .trustedPrivateChat
+        case "public_chat":
+            roomPreset = .publicChat
+        default:
+            roomPreset = .privateChat
         }
         let params = CreateRoomParameters(
             name: name,
             topic: topic,
             isEncrypted: isEncrypted,
-            isDirect: false,
+            isDirect: isDirect,
             visibility: .private,
-            preset: .privateChat,
+            preset: roomPreset,
             invite: invite
         )
         return try await c.createRoom(request: params)
@@ -553,6 +569,21 @@ class MatrixSDKBridge {
         let timeline = try await getOrCreateTimeline(room: room)
         let content = messageEventContentFromMarkdown(md: body)
         try await timeline.send(msg: content)
+        return ""
+    }
+
+    func editMessage(roomId: String, eventId: String, newBody: String) async throws -> String {
+        let room = try requireRoom(roomId: roomId)
+        let content = messageEventContentFromMarkdown(md: newBody)
+        try await room.edit(eventId: eventId, newContent: content)
+        return ""
+    }
+
+    func sendReply(roomId: String, body: String, replyToEventId: String, msgtype: String) async throws -> String {
+        let room = try requireRoom(roomId: roomId)
+        let timeline = try await getOrCreateTimeline(room: room)
+        let content = messageEventContentFromMarkdown(md: body)
+        try await timeline.sendReply(msg: content, eventId: replyToEventId)
         return ""
     }
 
@@ -772,6 +803,125 @@ class MatrixSDKBridge {
         return "\(baseUrl)/_matrix/client/v1/media/download/\(mxcPath)?access_token=\(session.accessToken)"
     }
 
+    func getThumbnailUrl(mxcUrl: String, width: Int, height: Int, method: String) throws -> String {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let mxcPath = mxcUrl.replacingOccurrences(of: "mxc://", with: "")
+        return "\(baseUrl)/_matrix/client/v1/media/thumbnail/\(mxcPath)?width=\(width)&height=\(height)&method=\(method)&access_token=\(session.accessToken)"
+    }
+
+    // MARK: - Content Upload
+
+    func uploadContent(fileUri: String, fileName: String, mimeType: String) async throws -> String {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let encodedFileName = fileName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? fileName
+        let urlString = "\(baseUrl)/_matrix/media/v3/upload?filename=\(encodedFileName)"
+        guard let url = URL(string: urlString) else {
+            throw MatrixBridgeError.notSupported("Invalid upload URL")
+        }
+
+        // Read file data from URI
+        let fileData: Data
+        if fileUri.hasPrefix("file://"), let fileUrl = URL(string: fileUri) {
+            fileData = try Data(contentsOf: fileUrl)
+        } else {
+            let fileUrl = URL(fileURLWithPath: fileUri)
+            fileData = try Data(contentsOf: fileUrl)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = fileData
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard statusCode >= 200 && statusCode < 300 else {
+            throw MatrixBridgeError.notSupported("Upload failed with status \(statusCode)")
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let contentUri = json["content_uri"] as? String else {
+            throw MatrixBridgeError.notSupported("Invalid upload response")
+        }
+        return contentUri
+    }
+
+    // MARK: - Devices
+
+    func getDevices() async throws -> [[String: Any]] {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let urlString = "\(baseUrl)/_matrix/client/v3/devices"
+        guard let url = URL(string: urlString) else {
+            throw MatrixBridgeError.notSupported("Invalid devices URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard statusCode >= 200 && statusCode < 300 else {
+            throw MatrixBridgeError.notSupported("getDevices failed with status \(statusCode)")
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let devicesArray = json["devices"] as? [[String: Any]] else {
+            throw MatrixBridgeError.notSupported("Invalid devices response")
+        }
+
+        return devicesArray.map { device in
+            [
+                "deviceId": device["device_id"] as? String ?? "",
+                "displayName": device["display_name"] as Any,
+                "lastSeenTs": device["last_seen_ts"] as Any,
+                "lastSeenIp": device["last_seen_ip"] as Any,
+            ]
+        }
+    }
+
+    func deleteDevice(deviceId: String) async throws {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let urlString = "\(baseUrl)/_matrix/client/v3/devices/\(deviceId)"
+        guard let url = URL(string: urlString) else {
+            throw MatrixBridgeError.notSupported("Invalid device URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "{}".data(using: .utf8)
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        // 401 means UIA is required - for now we just throw
+        guard statusCode >= 200 && statusCode < 300 else {
+            throw MatrixBridgeError.notSupported("deleteDevice failed with status \(statusCode)")
+        }
+    }
+
     // MARK: - Typing
 
     func sendTyping(roomId: String, isTyping: Bool) async throws {
@@ -902,6 +1052,9 @@ class MatrixSDKBridge {
             @unknown default: return "join"
             }
         }()
+        let isDirect = info.isDirect
+        let avatarUrl: String? = nil // Rust SDK doesn't expose avatar URL via RoomInfo yet
+
         return [
             "roomId": room.id(),
             "name": info.displayName ?? "",
@@ -911,6 +1064,8 @@ class MatrixSDKBridge {
             "unreadCount": info.numUnreadMessages ?? 0,
             "lastEventTs": nil as Int? as Any,
             "membership": membership,
+            "avatarUrl": avatarUrl as Any,
+            "isDirect": isDirect,
         ]
     }
 

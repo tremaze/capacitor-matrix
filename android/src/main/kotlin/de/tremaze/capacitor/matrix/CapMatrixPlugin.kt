@@ -101,11 +101,9 @@ class MatrixPlugin : Plugin() {
                     onMessage = { event ->
                         try {
                             val jsEvent = mapToJSObject(event)
-                            android.util.Log.d("CapMatrix", "notifyListeners messageReceived: eventId=${event["eventId"]} type=${event["type"]}")
                             notifyListeners("messageReceived", JSObject().put("event", jsEvent))
-                            android.util.Log.d("CapMatrix", "notifyListeners messageReceived: done")
-                        } catch (e: Exception) {
-                            android.util.Log.e("CapMatrix", "Error in onMessage callback: ${e.message}", e)
+                        } catch (_: Exception) {
+                            // ignore serialization errors
                         }
                     },
                     onRoomUpdate = { roomId, summary ->
@@ -115,7 +113,6 @@ class MatrixPlugin : Plugin() {
                         )
                     },
                     onReceipt = { roomId ->
-                        android.util.Log.d("CapMatrix", "onReceipt callback fired for room=$roomId, notifying JS")
                         notifyListeners(
                             "receiptReceived",
                             JSObject().put("roomId", roomId),
@@ -210,6 +207,20 @@ class MatrixPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun forgetRoom(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+
+        scope.launch {
+            try {
+                bridge.forgetRoom(roomId)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "forgetRoom failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
     fun sendMessage(call: PluginCall) {
         val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
         val body = call.getString("body") ?: return call.reject("Missing body")
@@ -221,6 +232,39 @@ class MatrixPlugin : Plugin() {
                 call.resolve(JSObject().put("eventId", eventId))
             } catch (e: Exception) {
                 call.reject(e.message ?: "sendMessage failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun editMessage(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val eventId = call.getString("eventId") ?: return call.reject("Missing eventId")
+        val newBody = call.getString("newBody") ?: return call.reject("Missing newBody")
+
+        scope.launch {
+            try {
+                val resultEventId = bridge.editMessage(roomId, eventId, newBody)
+                call.resolve(JSObject().put("eventId", resultEventId))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "editMessage failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun sendReply(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val body = call.getString("body") ?: return call.reject("Missing body")
+        val replyToEventId = call.getString("replyToEventId") ?: return call.reject("Missing replyToEventId")
+        val msgtype = call.getString("msgtype") ?: "m.text"
+
+        scope.launch {
+            try {
+                val resultEventId = bridge.sendReply(roomId, body, replyToEventId, msgtype)
+                call.resolve(JSObject().put("eventId", resultEventId))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "sendReply failed", e)
             }
         }
     }
@@ -289,6 +333,8 @@ class MatrixPlugin : Plugin() {
         val name = call.getString("name")
         val topic = call.getString("topic")
         val isEncrypted = call.getBoolean("isEncrypted") ?: false
+        val isDirect = call.getBoolean("isDirect") ?: false
+        val preset = call.getString("preset")
         val inviteArray = call.getArray("invite")
         val invite = inviteArray?.let { arr ->
             (0 until arr.length()).map { arr.getString(it) }
@@ -296,7 +342,7 @@ class MatrixPlugin : Plugin() {
 
         scope.launch {
             try {
-                val roomId = bridge.createRoom(name, topic, isEncrypted, invite)
+                val roomId = bridge.createRoom(name, topic, isEncrypted, isDirect, invite, preset)
                 call.resolve(JSObject().put("roomId", roomId))
             } catch (e: Exception) {
                 call.reject(e.message ?: "createRoom failed", e)
@@ -379,6 +425,85 @@ class MatrixPlugin : Plugin() {
                 call.reject(e.message ?: "setRoomTopic failed", e)
             }
         }
+    }
+
+    @PluginMethod
+    fun setRoomAvatar(call: PluginCall) {
+        val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
+        val mxcUrl = call.getString("mxcUrl") ?: return call.reject("Missing mxcUrl")
+
+        scope.launch {
+            try {
+                bridge.setRoomAvatar(roomId, mxcUrl)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "setRoomAvatar failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun uploadContent(call: PluginCall) {
+        val fileUri = call.getString("fileUri") ?: return call.reject("Missing fileUri")
+        val fileName = call.getString("fileName") ?: return call.reject("Missing fileName")
+        val mimeType = call.getString("mimeType") ?: return call.reject("Missing mimeType")
+
+        scope.launch {
+            try {
+                val contentUri = bridge.uploadContent(fileUri, fileName, mimeType)
+                call.resolve(JSObject().put("contentUri", contentUri))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "uploadContent failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun getThumbnailUrl(call: PluginCall) {
+        val mxcUrl = call.getString("mxcUrl") ?: return call.reject("Missing mxcUrl")
+        val width = call.getInt("width") ?: return call.reject("Missing width")
+        val height = call.getInt("height") ?: return call.reject("Missing height")
+        val method = call.getString("method") ?: "scale"
+
+        try {
+            val httpUrl = bridge.getThumbnailUrl(mxcUrl, width, height, method)
+            call.resolve(JSObject().put("httpUrl", httpUrl))
+        } catch (e: Exception) {
+            call.reject(e.message ?: "getThumbnailUrl failed", e)
+        }
+    }
+
+    @PluginMethod
+    fun getDevices(call: PluginCall) {
+        scope.launch {
+            try {
+                val devices = bridge.getDevices()
+                val jsDevices = JSArray()
+                devices.forEach { device -> jsDevices.put(mapToJSObject(device)) }
+                call.resolve(JSObject().put("devices", jsDevices))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "getDevices failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun deleteDevice(call: PluginCall) {
+        val deviceId = call.getString("deviceId") ?: return call.reject("Missing deviceId")
+
+        scope.launch {
+            try {
+                bridge.deleteDevice(deviceId)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "deleteDevice failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun setPusher(call: PluginCall) {
+        call.reject("setPusher is not yet supported on this platform")
     }
 
     @PluginMethod

@@ -8,10 +8,11 @@ import {
   MsgType,
   EventType,
   RelationType,
+  UserEvent,
 } from 'matrix-js-sdk';
 import { decodeRecoveryKey } from 'matrix-js-sdk/lib/crypto-api/recovery-key';
 import { deriveRecoveryKeyFromPassphrase } from 'matrix-js-sdk/lib/crypto-api/key-passphrase';
-import type { MatrixClient, Room, MatrixEvent as SdkMatrixEvent } from 'matrix-js-sdk';
+import type { MatrixClient, Room, MatrixEvent as SdkMatrixEvent, User } from 'matrix-js-sdk';
 
 import type {
   MatrixPlugin,
@@ -19,6 +20,13 @@ import type {
   LoginWithTokenOptions,
   SessionInfo,
   SendMessageOptions,
+  EditMessageOptions,
+  SendReplyOptions,
+  UploadContentOptions,
+  UploadContentResult,
+  ThumbnailUrlOptions,
+  PusherOptions,
+  DeviceInfo,
   MatrixEvent,
   RoomSummary,
   RoomMember,
@@ -228,6 +236,17 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       }
     });
 
+    this.client!.on(UserEvent.Presence, (_event: SdkMatrixEvent | undefined, user: User) => {
+      this.notifyListeners('presenceChanged', {
+        userId: user.userId,
+        presence: {
+          presence: (user.presence as PresenceInfo['presence']) ?? 'offline',
+          statusMsg: user.presenceStatusMsg ?? undefined,
+          lastActiveAgo: user.lastActiveAgo ?? undefined,
+        },
+      });
+    });
+
     await this.client!.startClient({ initialSyncLimit: 20 });
   }
 
@@ -248,7 +267,10 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     name?: string;
     topic?: string;
     isEncrypted?: boolean;
+    isDirect?: boolean;
     invite?: string[];
+    preset?: 'private_chat' | 'trusted_private_chat' | 'public_chat';
+    historyVisibility?: 'invited' | 'joined' | 'shared' | 'world_readable';
   }): Promise<{ roomId: string }> {
     this.requireClient();
 
@@ -258,14 +280,26 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     if (options.name) createOpts.name = options.name;
     if (options.topic) createOpts.topic = options.topic;
     if (options.invite?.length) createOpts.invite = options.invite;
+    if (options.preset) createOpts.preset = options.preset;
+    if (options.isDirect) createOpts.is_direct = true;
+
+    const initialState: Record<string, unknown>[] = [];
     if (options.isEncrypted) {
-      createOpts.initial_state = [
-        {
-          type: 'm.room.encryption',
-          state_key: '',
-          content: { algorithm: 'm.megolm.v1.aes-sha2' },
-        },
-      ];
+      initialState.push({
+        type: 'm.room.encryption',
+        state_key: '',
+        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+      });
+    }
+    if (options.historyVisibility) {
+      initialState.push({
+        type: 'm.room.history_visibility',
+        state_key: '',
+        content: { history_visibility: options.historyVisibility },
+      });
+    }
+    if (initialState.length > 0) {
+      createOpts.initial_state = initialState;
     }
 
     const res = await this.client!.createRoom(createOpts);
@@ -288,6 +322,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       userId: m.userId,
       displayName: m.name ?? undefined,
       membership: m.membership as RoomMember['membership'],
+      avatarUrl: m.getMxcAvatarUrl() ?? undefined,
     }));
 
     return { members };
@@ -302,6 +337,11 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   async leaveRoom(options: { roomId: string }): Promise<void> {
     this.requireClient();
     await this.client!.leave(options.roomId);
+  }
+
+  async forgetRoom(options: { roomId: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.forget(options.roomId);
   }
 
   // ── Messaging ─────────────────────────────────────────
@@ -345,6 +385,71 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       msgtype: mappedType,
       body: options.body,
     });
+    return { eventId: res.event_id };
+  }
+
+  async editMessage(options: EditMessageOptions): Promise<{ eventId: string }> {
+    this.requireClient();
+    const content: Record<string, unknown> = {
+      msgtype: MsgType.Text,
+      body: `* ${options.newBody}`,
+      'm.new_content': {
+        msgtype: MsgType.Text,
+        body: options.newBody,
+      },
+      'm.relates_to': {
+        rel_type: 'm.replace',
+        event_id: options.eventId,
+      },
+    };
+    const res = await this.client!.sendMessage(options.roomId, content as any);
+    return { eventId: res.event_id };
+  }
+
+  async sendReply(options: SendReplyOptions): Promise<{ eventId: string }> {
+    this.requireClient();
+
+    const msgtype = options.msgtype ?? 'm.text';
+    const mediaTypes = ['m.image', 'm.audio', 'm.video', 'm.file'];
+
+    let content: Record<string, unknown>;
+
+    if (mediaTypes.includes(msgtype) && options.fileUri) {
+      // Media reply: upload file then send with reply relation
+      const response = await fetch(options.fileUri);
+      const blob = await response.blob();
+      const uploadRes = await this.client!.uploadContent(blob, {
+        name: options.fileName,
+        type: options.mimeType,
+      });
+      content = {
+        msgtype,
+        body: options.body || options.fileName || 'file',
+        url: uploadRes.content_uri,
+        info: {
+          mimetype: options.mimeType,
+          size: options.fileSize ?? blob.size,
+        },
+        'm.relates_to': {
+          'm.in_reply_to': {
+            event_id: options.replyToEventId,
+          },
+        },
+      };
+    } else {
+      // Text reply
+      content = {
+        msgtype: MsgType.Text,
+        body: options.body,
+        'm.relates_to': {
+          'm.in_reply_to': {
+            event_id: options.replyToEventId,
+          },
+        },
+      };
+    }
+
+    const res = await this.client!.sendMessage(options.roomId, content as any);
     return { eventId: res.event_id };
   }
 
@@ -494,6 +599,11 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     await this.client!.setRoomTopic(options.roomId, options.topic);
   }
 
+  async setRoomAvatar(options: { roomId: string; mxcUrl: string }): Promise<void> {
+    this.requireClient();
+    await this.client!.sendStateEvent(options.roomId, 'm.room.avatar' as any, { url: options.mxcUrl });
+  }
+
   async inviteUser(options: { roomId: string; userId: string }): Promise<void> {
     this.requireClient();
     await this.client!.invite(options.roomId, options.userId);
@@ -533,6 +643,27 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     return { httpUrl };
   }
 
+  async getThumbnailUrl(options: ThumbnailUrlOptions): Promise<{ httpUrl: string }> {
+    this.requireClient();
+    const mxcPath = options.mxcUrl.replace('mxc://', '');
+    const baseUrl = this.client!.getHomeserverUrl().replace(/\/$/, '');
+    const accessToken = this.client!.getAccessToken();
+    const method = options.method ?? 'scale';
+    const httpUrl = `${baseUrl}/_matrix/client/v1/media/thumbnail/${mxcPath}?width=${options.width}&height=${options.height}&method=${method}&access_token=${accessToken}`;
+    return { httpUrl };
+  }
+
+  async uploadContent(options: UploadContentOptions): Promise<UploadContentResult> {
+    this.requireClient();
+    const response = await fetch(options.fileUri);
+    const blob = await response.blob();
+    const res = await this.client!.uploadContent(blob, {
+      name: options.fileName,
+      type: options.mimeType,
+    });
+    return { contentUri: res.content_uri };
+  }
+
   // ── Presence ───────────────────────────────────────────
 
   async setPresence(options: { presence: 'online' | 'offline' | 'unavailable'; statusMsg?: string }): Promise<void> {
@@ -551,6 +682,40 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       statusMsg: user?.presenceStatusMsg ?? undefined,
       lastActiveAgo: user?.lastActiveAgo ?? undefined,
     };
+  }
+
+  // ── Device Management ──────────────────────────────────
+
+  async getDevices(): Promise<{ devices: DeviceInfo[] }> {
+    this.requireClient();
+    const res = await this.client!.getDevices();
+    const devices: DeviceInfo[] = (res.devices ?? []).map((d: any) => ({
+      deviceId: d.device_id,
+      displayName: d.display_name ?? undefined,
+      lastSeenTs: d.last_seen_ts ?? undefined,
+      lastSeenIp: d.last_seen_ip ?? undefined,
+    }));
+    return { devices };
+  }
+
+  async deleteDevice(options: { deviceId: string; auth?: Record<string, unknown> }): Promise<void> {
+    this.requireClient();
+    await this.client!.deleteDevice(options.deviceId, options.auth as any);
+  }
+
+  // ── Push ──────────────────────────────────────────────
+
+  async setPusher(options: PusherOptions): Promise<void> {
+    this.requireClient();
+    await this.client!.setPusher({
+      pushkey: options.pushkey,
+      kind: options.kind ?? undefined,
+      app_id: options.appId,
+      app_display_name: options.appDisplayName,
+      device_display_name: options.deviceDisplayName,
+      lang: options.lang,
+      data: options.data,
+    } as any);
   }
 
   // ── Encryption ──────────────────────────────────────────
@@ -835,6 +1000,12 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       }
     }
 
+    // Include unsigned data (e.g. m.relations for edits, transaction_id for local echo)
+    const unsignedData = event.getUnsigned?.();
+    const unsigned = unsignedData && Object.keys(unsignedData).length > 0
+      ? (unsignedData as Record<string, unknown>)
+      : undefined;
+
     return {
       eventId: eventId ?? '',
       roomId,
@@ -844,10 +1015,38 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       originServerTs: event.getTs(),
       status,
       readBy: readBy.length > 0 ? readBy : undefined,
+      unsigned,
     };
   }
 
   private serializeRoom(room: Room): RoomSummary {
+    // Detect DM: check m.direct account data or guess from room state
+    let isDirect = false;
+    try {
+      const directEvent = this.client?.getAccountData('m.direct' as any);
+      if (directEvent) {
+        const directContent = directEvent.getContent() as Record<string, string[]>;
+        for (const roomIds of Object.values(directContent)) {
+          if (roomIds.includes(room.roomId)) {
+            isDirect = true;
+            break;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // Get avatar URL
+    let avatarUrl: string | undefined;
+    const avatarEvent = room.currentState.getStateEvents('m.room.avatar', '');
+    if (avatarEvent) {
+      const mxcUrl = avatarEvent.getContent()?.url as string | undefined;
+      if (mxcUrl) {
+        avatarUrl = mxcUrl;
+      }
+    }
+
     return {
       roomId: room.roomId,
       name: room.name,
@@ -857,6 +1056,8 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       unreadCount: room.getUnreadNotificationCount() ?? 0,
       lastEventTs: room.getLastActiveTimestamp() || undefined,
       membership: room.getMyMembership() as RoomSummary['membership'],
+      avatarUrl,
+      isDirect,
     };
   }
 

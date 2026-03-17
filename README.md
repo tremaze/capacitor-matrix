@@ -324,7 +324,10 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`getRoomMembers(...)`](#getroommembers)
 * [`joinRoom(...)`](#joinroom)
 * [`leaveRoom(...)`](#leaveroom)
+* [`forgetRoom(...)`](#forgetroom)
 * [`sendMessage(...)`](#sendmessage)
+* [`editMessage(...)`](#editmessage)
+* [`sendReply(...)`](#sendreply)
 * [`getRoomMessages(...)`](#getroommessages)
 * [`markRoomAsRead(...)`](#markroomasread)
 * [`refreshEventStatuses(...)`](#refresheventstatuses)
@@ -332,15 +335,21 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`sendReaction(...)`](#sendreaction)
 * [`setRoomName(...)`](#setroomname)
 * [`setRoomTopic(...)`](#setroomtopic)
+* [`setRoomAvatar(...)`](#setroomavatar)
 * [`inviteUser(...)`](#inviteuser)
 * [`kickUser(...)`](#kickuser)
 * [`banUser(...)`](#banuser)
 * [`unbanUser(...)`](#unbanuser)
 * [`sendTyping(...)`](#sendtyping)
 * [`getMediaUrl(...)`](#getmediaurl)
+* [`getThumbnailUrl(...)`](#getthumbnailurl)
+* [`uploadContent(...)`](#uploadcontent)
 * [`searchUsers(...)`](#searchusers)
 * [`setPresence(...)`](#setpresence)
 * [`getPresence(...)`](#getpresence)
+* [`getDevices()`](#getdevices)
+* [`deleteDevice(...)`](#deletedevice)
+* [`setPusher(...)`](#setpusher)
 * [`initializeCrypto()`](#initializecrypto)
 * [`getEncryptionStatus()`](#getencryptionstatus)
 * [`bootstrapCrossSigning()`](#bootstrapcrosssigning)
@@ -358,6 +367,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`addListener('roomUpdated', ...)`](#addlistenerroomupdated-)
 * [`addListener('typingChanged', ...)`](#addlistenertypingchanged-)
 * [`addListener('receiptReceived', ...)`](#addlistenerreceiptreceived-)
+* [`addListener('presenceChanged', ...)`](#addlistenerpresencechanged-)
 * [`removeAllListeners()`](#removealllisteners)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
@@ -449,12 +459,12 @@ getSyncState() => Promise<{ state: SyncState; }>
 ### createRoom(...)
 
 ```typescript
-createRoom(options: { name?: string; topic?: string; isEncrypted?: boolean; invite?: string[]; }) => Promise<{ roomId: string; }>
+createRoom(options: { name?: string; topic?: string; isEncrypted?: boolean; isDirect?: boolean; invite?: string[]; preset?: 'private_chat' | 'trusted_private_chat' | 'public_chat'; historyVisibility?: 'invited' | 'joined' | 'shared' | 'world_readable'; }) => Promise<{ roomId: string; }>
 ```
 
-| Param         | Type                                                                                      |
-| ------------- | ----------------------------------------------------------------------------------------- |
-| **`options`** | <code>{ name?: string; topic?: string; isEncrypted?: boolean; invite?: string[]; }</code> |
+| Param         | Type                                                                                                                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`options`** | <code>{ name?: string; topic?: string; isEncrypted?: boolean; isDirect?: boolean; invite?: string[]; preset?: 'private_chat' \| 'trusted_private_chat' \| 'public_chat'; historyVisibility?: 'invited' \| 'joined' \| 'shared' \| 'world_readable'; }</code> |
 
 **Returns:** <code>Promise&lt;{ roomId: string; }&gt;</code>
 
@@ -515,6 +525,19 @@ leaveRoom(options: { roomId: string; }) => Promise<void>
 --------------------
 
 
+### forgetRoom(...)
+
+```typescript
+forgetRoom(options: { roomId: string; }) => Promise<void>
+```
+
+| Param         | Type                             |
+| ------------- | -------------------------------- |
+| **`options`** | <code>{ roomId: string; }</code> |
+
+--------------------
+
+
 ### sendMessage(...)
 
 ```typescript
@@ -524,6 +547,36 @@ sendMessage(options: SendMessageOptions) => Promise<{ eventId: string; }>
 | Param         | Type                                                              |
 | ------------- | ----------------------------------------------------------------- |
 | **`options`** | <code><a href="#sendmessageoptions">SendMessageOptions</a></code> |
+
+**Returns:** <code>Promise&lt;{ eventId: string; }&gt;</code>
+
+--------------------
+
+
+### editMessage(...)
+
+```typescript
+editMessage(options: EditMessageOptions) => Promise<{ eventId: string; }>
+```
+
+| Param         | Type                                                              |
+| ------------- | ----------------------------------------------------------------- |
+| **`options`** | <code><a href="#editmessageoptions">EditMessageOptions</a></code> |
+
+**Returns:** <code>Promise&lt;{ eventId: string; }&gt;</code>
+
+--------------------
+
+
+### sendReply(...)
+
+```typescript
+sendReply(options: SendReplyOptions) => Promise<{ eventId: string; }>
+```
+
+| Param         | Type                                                          |
+| ------------- | ------------------------------------------------------------- |
+| **`options`** | <code><a href="#sendreplyoptions">SendReplyOptions</a></code> |
 
 **Returns:** <code>Promise&lt;{ eventId: string; }&gt;</code>
 
@@ -627,6 +680,19 @@ setRoomTopic(options: { roomId: string; topic: string; }) => Promise<void>
 --------------------
 
 
+### setRoomAvatar(...)
+
+```typescript
+setRoomAvatar(options: { roomId: string; mxcUrl: string; }) => Promise<void>
+```
+
+| Param         | Type                                             |
+| ------------- | ------------------------------------------------ |
+| **`options`** | <code>{ roomId: string; mxcUrl: string; }</code> |
+
+--------------------
+
+
 ### inviteUser(...)
 
 ```typescript
@@ -707,6 +773,36 @@ getMediaUrl(options: { mxcUrl: string; }) => Promise<{ httpUrl: string; }>
 --------------------
 
 
+### getThumbnailUrl(...)
+
+```typescript
+getThumbnailUrl(options: ThumbnailUrlOptions) => Promise<{ httpUrl: string; }>
+```
+
+| Param         | Type                                                                |
+| ------------- | ------------------------------------------------------------------- |
+| **`options`** | <code><a href="#thumbnailurloptions">ThumbnailUrlOptions</a></code> |
+
+**Returns:** <code>Promise&lt;{ httpUrl: string; }&gt;</code>
+
+--------------------
+
+
+### uploadContent(...)
+
+```typescript
+uploadContent(options: UploadContentOptions) => Promise<UploadContentResult>
+```
+
+| Param         | Type                                                                  |
+| ------------- | --------------------------------------------------------------------- |
+| **`options`** | <code><a href="#uploadcontentoptions">UploadContentOptions</a></code> |
+
+**Returns:** <code>Promise&lt;<a href="#uploadcontentresult">UploadContentResult</a>&gt;</code>
+
+--------------------
+
+
 ### searchUsers(...)
 
 ```typescript
@@ -746,6 +842,43 @@ getPresence(options: { userId: string; }) => Promise<PresenceInfo>
 | **`options`** | <code>{ userId: string; }</code> |
 
 **Returns:** <code>Promise&lt;<a href="#presenceinfo">PresenceInfo</a>&gt;</code>
+
+--------------------
+
+
+### getDevices()
+
+```typescript
+getDevices() => Promise<{ devices: DeviceInfo[]; }>
+```
+
+**Returns:** <code>Promise&lt;{ devices: DeviceInfo[]; }&gt;</code>
+
+--------------------
+
+
+### deleteDevice(...)
+
+```typescript
+deleteDevice(options: { deviceId: string; auth?: Record<string, unknown>; }) => Promise<void>
+```
+
+| Param         | Type                                                                                           |
+| ------------- | ---------------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ deviceId: string; auth?: <a href="#record">Record</a>&lt;string, unknown&gt;; }</code> |
+
+--------------------
+
+
+### setPusher(...)
+
+```typescript
+setPusher(options: PusherOptions) => Promise<void>
+```
+
+| Param         | Type                                                    |
+| ------------- | ------------------------------------------------------- |
+| **`options`** | <code><a href="#pusheroptions">PusherOptions</a></code> |
 
 --------------------
 
@@ -980,6 +1113,22 @@ addListener(event: 'receiptReceived', listenerFunc: (data: ReceiptReceivedEvent)
 --------------------
 
 
+### addListener('presenceChanged', ...)
+
+```typescript
+addListener(event: 'presenceChanged', listenerFunc: (data: PresenceChangedEvent) => void) => Promise<PluginListenerHandle>
+```
+
+| Param              | Type                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| **`event`**        | <code>'presenceChanged'</code>                                                           |
+| **`listenerFunc`** | <code>(data: <a href="#presencechangedevent">PresenceChangedEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
 ### removeAllListeners()
 
 ```typescript
@@ -1033,6 +1182,8 @@ removeAllListeners() => Promise<void>
 | **`unreadCount`** | <code>number</code>                                 |
 | **`lastEventTs`** | <code>number</code>                                 |
 | **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code> |
+| **`avatarUrl`**   | <code>string</code>                                 |
+| **`isDirect`**    | <code>boolean</code>                                |
 
 
 #### RoomMember
@@ -1042,6 +1193,7 @@ removeAllListeners() => Promise<void>
 | **`userId`**      | <code>string</code>                                 |
 | **`displayName`** | <code>string</code>                                 |
 | **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code> |
+| **`avatarUrl`**   | <code>string</code>                                 |
 
 
 #### SendMessageOptions
@@ -1057,6 +1209,29 @@ removeAllListeners() => Promise<void>
 | **`fileSize`** | <code>number</code>                                                                                 |
 
 
+#### EditMessageOptions
+
+| Prop          | Type                |
+| ------------- | ------------------- |
+| **`roomId`**  | <code>string</code> |
+| **`eventId`** | <code>string</code> |
+| **`newBody`** | <code>string</code> |
+
+
+#### SendReplyOptions
+
+| Prop                 | Type                                                                                                |
+| -------------------- | --------------------------------------------------------------------------------------------------- |
+| **`roomId`**         | <code>string</code>                                                                                 |
+| **`body`**           | <code>string</code>                                                                                 |
+| **`replyToEventId`** | <code>string</code>                                                                                 |
+| **`msgtype`**        | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |
+| **`fileUri`**        | <code>string</code>                                                                                 |
+| **`fileName`**       | <code>string</code>                                                                                 |
+| **`mimeType`**       | <code>string</code>                                                                                 |
+| **`fileSize`**       | <code>number</code>                                                                                 |
+
+
 #### MatrixEvent
 
 | Prop                 | Type                                                             | Description                                                                         |
@@ -1069,6 +1244,33 @@ removeAllListeners() => Promise<void>
 | **`originServerTs`** | <code>number</code>                                              |                                                                                     |
 | **`status`**         | <code>'sending' \| 'sent' \| 'delivered' \| 'read'</code>        | Delivery/read status for own messages: 'sending' \| 'sent' \| 'delivered' \| 'read' |
 | **`readBy`**         | <code>string[]</code>                                            | User IDs that have read this event                                                  |
+| **`unsigned`**       | <code><a href="#record">Record</a>&lt;string, unknown&gt;</code> | Unsigned data (e.g. m.relations for edits, transaction_id for local echo)           |
+
+
+#### ThumbnailUrlOptions
+
+| Prop         | Type                           |
+| ------------ | ------------------------------ |
+| **`mxcUrl`** | <code>string</code>            |
+| **`width`**  | <code>number</code>            |
+| **`height`** | <code>number</code>            |
+| **`method`** | <code>'scale' \| 'crop'</code> |
+
+
+#### UploadContentResult
+
+| Prop             | Type                |
+| ---------------- | ------------------- |
+| **`contentUri`** | <code>string</code> |
+
+
+#### UploadContentOptions
+
+| Prop           | Type                |
+| -------------- | ------------------- |
+| **`fileUri`**  | <code>string</code> |
+| **`fileName`** | <code>string</code> |
+| **`mimeType`** | <code>string</code> |
 
 
 #### UserProfile
@@ -1087,6 +1289,29 @@ removeAllListeners() => Promise<void>
 | **`presence`**      | <code>'online' \| 'offline' \| 'unavailable'</code> |
 | **`statusMsg`**     | <code>string</code>                                 |
 | **`lastActiveAgo`** | <code>number</code>                                 |
+
+
+#### DeviceInfo
+
+| Prop              | Type                |
+| ----------------- | ------------------- |
+| **`deviceId`**    | <code>string</code> |
+| **`displayName`** | <code>string</code> |
+| **`lastSeenTs`**  | <code>number</code> |
+| **`lastSeenIp`**  | <code>string</code> |
+
+
+#### PusherOptions
+
+| Prop                    | Type                                           |
+| ----------------------- | ---------------------------------------------- |
+| **`pushkey`**           | <code>string</code>                            |
+| **`kind`**              | <code>string \| null</code>                    |
+| **`appId`**             | <code>string</code>                            |
+| **`appDisplayName`**    | <code>string</code>                            |
+| **`deviceDisplayName`** | <code>string</code>                            |
+| **`lang`**              | <code>string</code>                            |
+| **`data`**              | <code>{ url: string; format?: string; }</code> |
 
 
 #### EncryptionStatus
@@ -1169,6 +1394,14 @@ removeAllListeners() => Promise<void>
 | Prop         | Type                |
 | ------------ | ------------------- |
 | **`roomId`** | <code>string</code> |
+
+
+#### PresenceChangedEvent
+
+| Prop           | Type                                                  |
+| -------------- | ----------------------------------------------------- |
+| **`userId`**   | <code>string</code>                                   |
+| **`presence`** | <code><a href="#presenceinfo">PresenceInfo</a></code> |
 
 
 ### Type Aliases

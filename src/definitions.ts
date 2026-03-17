@@ -53,6 +53,51 @@ export interface ReceiptReceivedEvent {
   roomId: string;
 }
 
+export interface PresenceChangedEvent {
+  userId: string;
+  presence: PresenceInfo;
+}
+
+// Edit & Reply
+
+export interface EditMessageOptions {
+  roomId: string;
+  eventId: string;
+  newBody: string;
+}
+
+export interface SendReplyOptions {
+  roomId: string;
+  body: string;
+  replyToEventId: string;
+  msgtype?: 'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.audio' | 'm.video' | 'm.file';
+  fileUri?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+}
+
+// Upload
+
+export interface UploadContentOptions {
+  fileUri: string;
+  fileName: string;
+  mimeType: string;
+}
+
+export interface UploadContentResult {
+  contentUri: string;
+}
+
+// Thumbnail
+
+export interface ThumbnailUrlOptions {
+  mxcUrl: string;
+  width: number;
+  height: number;
+  method?: 'scale' | 'crop';
+}
+
 export interface MatrixEvent {
   eventId: string;
   roomId: string;
@@ -64,6 +109,8 @@ export interface MatrixEvent {
   status?: 'sending' | 'sent' | 'delivered' | 'read';
   /** User IDs that have read this event */
   readBy?: string[];
+  /** Unsigned data (e.g. m.relations for edits, transaction_id for local echo) */
+  unsigned?: Record<string, unknown>;
 }
 
 // Rooms
@@ -77,12 +124,36 @@ export interface RoomSummary {
   unreadCount: number;
   lastEventTs?: number;
   membership?: 'join' | 'invite' | 'leave' | 'ban';
+  avatarUrl?: string;
+  isDirect?: boolean;
 }
 
 export interface RoomMember {
   userId: string;
   displayName?: string;
   membership: 'join' | 'invite' | 'leave' | 'ban';
+  avatarUrl?: string;
+}
+
+// Device Management
+
+export interface DeviceInfo {
+  deviceId: string;
+  displayName?: string;
+  lastSeenTs?: number;
+  lastSeenIp?: string;
+}
+
+// Pusher
+
+export interface PusherOptions {
+  pushkey: string;
+  kind: string | null;
+  appId: string;
+  appDisplayName: string;
+  deviceDisplayName: string;
+  lang: string;
+  data: { url: string; format?: string };
 }
 
 // User Discovery
@@ -157,15 +228,21 @@ export interface MatrixPlugin {
     name?: string;
     topic?: string;
     isEncrypted?: boolean;
+    isDirect?: boolean;
     invite?: string[];
+    preset?: 'private_chat' | 'trusted_private_chat' | 'public_chat';
+    historyVisibility?: 'invited' | 'joined' | 'shared' | 'world_readable';
   }): Promise<{ roomId: string }>;
   getRooms(): Promise<{ rooms: RoomSummary[] }>;
   getRoomMembers(options: { roomId: string }): Promise<{ members: RoomMember[] }>;
   joinRoom(options: { roomIdOrAlias: string }): Promise<{ roomId: string }>;
   leaveRoom(options: { roomId: string }): Promise<void>;
+  forgetRoom(options: { roomId: string }): Promise<void>;
 
   // Messaging
   sendMessage(options: SendMessageOptions): Promise<{ eventId: string }>;
+  editMessage(options: EditMessageOptions): Promise<{ eventId: string }>;
+  sendReply(options: SendReplyOptions): Promise<{ eventId: string }>;
   getRoomMessages(options: {
     roomId: string;
     limit?: number;
@@ -193,6 +270,7 @@ export interface MatrixPlugin {
   // Room Management
   setRoomName(options: { roomId: string; name: string }): Promise<void>;
   setRoomTopic(options: { roomId: string; topic: string }): Promise<void>;
+  setRoomAvatar(options: { roomId: string; mxcUrl: string }): Promise<void>;
   inviteUser(options: { roomId: string; userId: string }): Promise<void>;
   kickUser(options: { roomId: string; userId: string; reason?: string }): Promise<void>;
   banUser(options: { roomId: string; userId: string; reason?: string }): Promise<void>;
@@ -207,6 +285,8 @@ export interface MatrixPlugin {
 
   // Media
   getMediaUrl(options: { mxcUrl: string }): Promise<{ httpUrl: string }>;
+  getThumbnailUrl(options: ThumbnailUrlOptions): Promise<{ httpUrl: string }>;
+  uploadContent(options: UploadContentOptions): Promise<UploadContentResult>;
 
   // User Discovery
   searchUsers(options: {
@@ -220,6 +300,13 @@ export interface MatrixPlugin {
     statusMsg?: string;
   }): Promise<void>;
   getPresence(options: { userId: string }): Promise<PresenceInfo>;
+
+  // Device Management
+  getDevices(): Promise<{ devices: DeviceInfo[] }>;
+  deleteDevice(options: { deviceId: string; auth?: Record<string, unknown> }): Promise<void>;
+
+  // Push
+  setPusher(options: PusherOptions): Promise<void>;
 
   // Encryption
   initializeCrypto(): Promise<void>;
@@ -269,6 +356,10 @@ export interface MatrixPlugin {
   addListener(
     event: 'receiptReceived',
     listenerFunc: (data: ReceiptReceivedEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    event: 'presenceChanged',
+    listenerFunc: (data: PresenceChangedEvent) => void,
   ): Promise<PluginListenerHandle>;
   removeAllListeners(): Promise<void>;
 }
