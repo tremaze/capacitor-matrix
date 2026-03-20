@@ -350,7 +350,16 @@ export interface MatrixPlugin {
   }): Promise<{ importedKeys: number }>;
   setupRecovery(options?: {
     passphrase?: string;
+    /**
+     * Passphrase for the *existing* secret storage key, used by
+     * bootstrapSecretStorage to decrypt and migrate the current cross-signing
+     * and backup secrets into the newly created SSSS. Only needed on web;
+     * native platforms (Rust SDK) handle the migration internally.
+     */
+    existingPassphrase?: string;
   }): Promise<RecoveryKeyInfo>;
+  /** Wipe all local Matrix state (crypto DB, session, caches). */
+  clearAllData(): Promise<void>;
   isRecoveryEnabled(): Promise<{ enabled: boolean }>;
   recoverAndSetup(options: {
     recoveryKey?: string;

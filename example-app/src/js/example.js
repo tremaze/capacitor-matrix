@@ -159,10 +159,13 @@ window.doLogin = async () => {
     return log('Fill in all login fields', 'error');
   }
 
+  await clearStaleDataIfUserChanged(userId);
+
   log('Logging in...');
   try {
     const session = await Matrix.login({ homeserverUrl, userId, password });
     currentUserId = session.userId;
+    localStorage.setItem('lastMatrixUserId', session.userId);
     logResult('Login success', session);
     setStatus(`Logged in as ${session.userId}`, 'connected');
     showApp();
@@ -182,6 +185,8 @@ window.doLoginWithToken = async () => {
     return log('Fill in all token login fields', 'error');
   }
 
+  await clearStaleDataIfUserChanged(userId);
+
   log('Logging in with token...');
   try {
     const session = await Matrix.loginWithToken({
@@ -191,6 +196,7 @@ window.doLoginWithToken = async () => {
       deviceId,
     });
     currentUserId = session.userId;
+    localStorage.setItem('lastMatrixUserId', session.userId);
     logResult('Token login success', session);
     setStatus(`Logged in as ${session.userId}`, 'connected');
     showApp();
@@ -209,6 +215,7 @@ window.doLogout = async () => {
     selectedRoomId = null;
     currentUserId = null;
     currentRooms = [];
+    localStorage.removeItem('lastMatrixUserId');
     document.getElementById('roomList').innerHTML = '';
     document.getElementById('loginScreen').classList.remove('hidden');
     document.getElementById('appShell').classList.remove('active');
@@ -217,6 +224,26 @@ window.doLogout = async () => {
     logError('Logout', e);
   }
 };
+
+/**
+ * If the incoming userId differs from the last logged-in user, wipe all local
+ * Matrix state (crypto store, session, caches) before logging in. This prevents
+ * stale secret-storage / backup-key data from one user causing recovery failures
+ * for another.
+ */
+async function clearStaleDataIfUserChanged(incomingUserId) {
+  const lastUserId = localStorage.getItem('lastMatrixUserId');
+  if (lastUserId && lastUserId !== incomingUserId) {
+    log(`Different user detected (was ${lastUserId}, now ${incomingUserId}) — clearing local state...`, 'event');
+    try {
+      await Matrix.clearAllData();
+      localStorage.removeItem('lastMatrixUserId');
+      log('Local state cleared', 'success');
+    } catch (e) {
+      logError('clearStaleData', e);
+    }
+  }
+}
 
 window.doClearAllData = async () => {
   if (!confirm('This will delete ALL Matrix data (session, crypto keys, messages). Continue?')) return;
@@ -612,6 +639,8 @@ function showRecoverModal() {
   `);
 }
 
+let _recoveryClearAttempted = false;
+
 window.doModalRecover = async () => {
   const input = document.getElementById('modalRecoveryInput')?.value.trim();
   if (!input) return;
@@ -631,14 +660,44 @@ window.doModalRecover = async () => {
     }
 
     log('Device verified successfully', 'success');
+    _recoveryClearAttempted = false;
 
     const status = await Matrix.getEncryptionStatus();
     logResult('Encryption status after recovery', status);
 
     hideModal();  // This resolves the promise, allowing sync to start
   } catch (e) {
-    logError('recover', e);
-    showRecoverErrorModal(e.message || String(e));
+    const msg = e.message || String(e);
+    const isMismatch = msg.includes('decryption key does not match');
+
+    if (isMismatch && !_recoveryClearAttempted) {
+      // Stale local crypto state — wipe it, re-login fresh, and retry
+      _recoveryClearAttempted = true;
+      log('Backup key mismatch — clearing stale local state and retrying...', 'event');
+      try {
+        const session = await Matrix.getSession();
+        await Matrix.clearAllData();
+        localStorage.removeItem('lastMatrixUserId');
+        await Matrix.loginWithToken({
+          homeserverUrl: session.homeserverUrl,
+          accessToken: session.accessToken,
+          userId: session.userId,
+          deviceId: session.deviceId,
+        });
+        localStorage.setItem('lastMatrixUserId', session.userId);
+        await Matrix.initializeCrypto();
+        // Re-show the recover modal — crypto state is now clean from the server
+        showRecoverModal();
+        const inputEl = document.getElementById('modalRecoveryInput');
+        if (inputEl) inputEl.value = input; // preserve what they typed
+      } catch (retryErr) {
+        logError('recover-clear-retry', retryErr);
+        showRecoverErrorModal(msg);
+      }
+    } else {
+      logError('recover', e);
+      showRecoverErrorModal(msg);
+    }
   }
 };
 
@@ -646,7 +705,7 @@ function showRecoverErrorModal(errorMsg) {
   showModal(`
     <h2>Recovery Failed</h2>
     <p style="color:var(--red)">${esc(errorMsg)}</p>
-    <p>You can try again or reset encryption to start fresh (you may lose access to old messages).</p>
+    <p>The passphrase or recovery key you entered is incorrect. You can try again or reset everything from scratch.</p>
     <div class="btn-row">
       <button class="modal-btn modal-btn-secondary" onclick="showRecoverModal()">Try Again</button>
       <button class="modal-btn modal-btn-danger" id="modalResetBtn" onclick="doModalReset()">Reset Encryption</button>
@@ -1746,7 +1805,9 @@ log('Matrix plugin test app loaded');
   try {
     const session = await Matrix.getSession();
     if (session && session.userId && session.accessToken) {
+      await clearStaleDataIfUserChanged(session.userId);
       currentUserId = session.userId;
+      localStorage.setItem('lastMatrixUserId', session.userId);
       log(`Restoring session: ${session.userId}`, 'success');
       document.getElementById('homeserverUrl').value = session.homeserverUrl || '';
       document.getElementById('userId').value = session.userId || '';

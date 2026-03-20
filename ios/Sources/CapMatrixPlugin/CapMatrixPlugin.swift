@@ -56,6 +56,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getDevices", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteDevice", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPusher", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "clearAllData", returnType: CAPPluginReturnPromise),
     ]
 
     private let matrixBridge = MatrixSDKBridge()
@@ -395,6 +396,9 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func setupRecovery(_ call: CAPPluginCall) {
         let passphrase = call.getString("passphrase")
+        // existingPassphrase is a web-only hint for SSSS migration; the Rust SDK
+        // handles migration internally on iOS. Read and ignore for now.
+        _ = call.getString("existingPassphrase")
 
         Task {
             do {

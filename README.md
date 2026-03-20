@@ -357,6 +357,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`getKeyBackupStatus()`](#getkeybackupstatus)
 * [`restoreKeyBackup(...)`](#restorekeybackup)
 * [`setupRecovery(...)`](#setuprecovery)
+* [`clearAllData()`](#clearalldata)
 * [`isRecoveryEnabled()`](#isrecoveryenabled)
 * [`recoverAndSetup(...)`](#recoverandsetup)
 * [`resetRecoveryKey(...)`](#resetrecoverykey)
@@ -952,14 +953,25 @@ restoreKeyBackup(options?: { recoveryKey?: string | undefined; } | undefined) =>
 ### setupRecovery(...)
 
 ```typescript
-setupRecovery(options?: { passphrase?: string | undefined; } | undefined) => Promise<RecoveryKeyInfo>
+setupRecovery(options?: { passphrase?: string | undefined; existingPassphrase?: string | undefined; } | undefined) => Promise<RecoveryKeyInfo>
 ```
 
-| Param         | Type                                  |
-| ------------- | ------------------------------------- |
-| **`options`** | <code>{ passphrase?: string; }</code> |
+| Param         | Type                                                               |
+| ------------- | ------------------------------------------------------------------ |
+| **`options`** | <code>{ passphrase?: string; existingPassphrase?: string; }</code> |
 
 **Returns:** <code>Promise&lt;<a href="#recoverykeyinfo">RecoveryKeyInfo</a>&gt;</code>
+
+--------------------
+
+
+### clearAllData()
+
+```typescript
+clearAllData() => Promise<void>
+```
+
+Wipe all local Matrix state (crypto DB, session, caches).
 
 --------------------
 
@@ -1198,38 +1210,52 @@ removeAllListeners() => Promise<void>
 
 #### SendMessageOptions
 
-| Prop           | Type                                                                                                |
-| -------------- | --------------------------------------------------------------------------------------------------- |
-| **`roomId`**   | <code>string</code>                                                                                 |
-| **`body`**     | <code>string</code>                                                                                 |
-| **`msgtype`**  | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |
-| **`fileUri`**  | <code>string</code>                                                                                 |
-| **`fileName`** | <code>string</code>                                                                                 |
-| **`mimeType`** | <code>string</code>                                                                                 |
-| **`fileSize`** | <code>number</code>                                                                                 |
+| Prop           | Type                                                                                                | Description                                                               |
+| -------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **`roomId`**   | <code>string</code>                                                                                 |                                                                           |
+| **`body`**     | <code>string</code>                                                                                 |                                                                           |
+| **`msgtype`**  | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |                                                                           |
+| **`fileUri`**  | <code>string</code>                                                                                 |                                                                           |
+| **`fileName`** | <code>string</code>                                                                                 |                                                                           |
+| **`mimeType`** | <code>string</code>                                                                                 |                                                                           |
+| **`fileSize`** | <code>number</code>                                                                                 |                                                                           |
+| **`duration`** | <code>number</code>                                                                                 | Audio/video duration in milliseconds (sets info.duration per Matrix spec) |
+| **`width`**    | <code>number</code>                                                                                 | Image/video width in pixels (sets info.w per Matrix spec)                 |
+| **`height`**   | <code>number</code>                                                                                 | Image/video height in pixels (sets info.h per Matrix spec)                |
 
 
 #### EditMessageOptions
 
-| Prop          | Type                |
-| ------------- | ------------------- |
-| **`roomId`**  | <code>string</code> |
-| **`eventId`** | <code>string</code> |
-| **`newBody`** | <code>string</code> |
+| Prop           | Type                                                                                                | Description                                                             |
+| -------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **`roomId`**   | <code>string</code>                                                                                 |                                                                         |
+| **`eventId`**  | <code>string</code>                                                                                 |                                                                         |
+| **`newBody`**  | <code>string</code>                                                                                 |                                                                         |
+| **`msgtype`**  | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> | Required when editing a media message; must match the original msgtype  |
+| **`fileUri`**  | <code>string</code>                                                                                 | New file to replace the media content (optional for caption-only edits) |
+| **`fileName`** | <code>string</code>                                                                                 |                                                                         |
+| **`mimeType`** | <code>string</code>                                                                                 |                                                                         |
+| **`fileSize`** | <code>number</code>                                                                                 |                                                                         |
+| **`duration`** | <code>number</code>                                                                                 | Audio/video duration in milliseconds                                    |
+| **`width`**    | <code>number</code>                                                                                 | Image/video width in pixels                                             |
+| **`height`**   | <code>number</code>                                                                                 | Image/video height in pixels                                            |
 
 
 #### SendReplyOptions
 
-| Prop                 | Type                                                                                                |
-| -------------------- | --------------------------------------------------------------------------------------------------- |
-| **`roomId`**         | <code>string</code>                                                                                 |
-| **`body`**           | <code>string</code>                                                                                 |
-| **`replyToEventId`** | <code>string</code>                                                                                 |
-| **`msgtype`**        | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |
-| **`fileUri`**        | <code>string</code>                                                                                 |
-| **`fileName`**       | <code>string</code>                                                                                 |
-| **`mimeType`**       | <code>string</code>                                                                                 |
-| **`fileSize`**       | <code>number</code>                                                                                 |
+| Prop                 | Type                                                                                                | Description                                                               |
+| -------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **`roomId`**         | <code>string</code>                                                                                 |                                                                           |
+| **`body`**           | <code>string</code>                                                                                 |                                                                           |
+| **`replyToEventId`** | <code>string</code>                                                                                 |                                                                           |
+| **`msgtype`**        | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |                                                                           |
+| **`fileUri`**        | <code>string</code>                                                                                 |                                                                           |
+| **`fileName`**       | <code>string</code>                                                                                 |                                                                           |
+| **`mimeType`**       | <code>string</code>                                                                                 |                                                                           |
+| **`fileSize`**       | <code>number</code>                                                                                 |                                                                           |
+| **`duration`**       | <code>number</code>                                                                                 | Audio/video duration in milliseconds (sets info.duration per Matrix spec) |
+| **`width`**          | <code>number</code>                                                                                 | Image/video width in pixels (sets info.w per Matrix spec)                 |
+| **`height`**         | <code>number</code>                                                                                 | Image/video height in pixels (sets info.h per Matrix spec)                |
 
 
 #### MatrixEvent
@@ -1293,12 +1319,13 @@ removeAllListeners() => Promise<void>
 
 #### DeviceInfo
 
-| Prop              | Type                |
-| ----------------- | ------------------- |
-| **`deviceId`**    | <code>string</code> |
-| **`displayName`** | <code>string</code> |
-| **`lastSeenTs`**  | <code>number</code> |
-| **`lastSeenIp`**  | <code>string</code> |
+| Prop                         | Type                 | Description                                       |
+| ---------------------------- | -------------------- | ------------------------------------------------- |
+| **`deviceId`**               | <code>string</code>  |                                                   |
+| **`displayName`**            | <code>string</code>  |                                                   |
+| **`lastSeenTs`**             | <code>number</code>  |                                                   |
+| **`lastSeenIp`**             | <code>string</code>  |                                                   |
+| **`isCrossSigningVerified`** | <code>boolean</code> | Whether this device is verified via cross-signing |
 
 
 #### PusherOptions
@@ -1391,9 +1418,11 @@ removeAllListeners() => Promise<void>
 
 #### ReceiptReceivedEvent
 
-| Prop         | Type                |
-| ------------ | ------------------- |
-| **`roomId`** | <code>string</code> |
+| Prop          | Type                | Description                        |
+| ------------- | ------------------- | ---------------------------------- |
+| **`roomId`**  | <code>string</code> |                                    |
+| **`eventId`** | <code>string</code> | The event that was read            |
+| **`userId`**  | <code>string</code> | The user who sent the read receipt |
 
 
 #### PresenceChangedEvent

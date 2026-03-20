@@ -705,6 +705,9 @@ class MatrixPlugin : Plugin() {
     @PluginMethod
     fun setupRecovery(call: PluginCall) {
         val passphrase = call.getString("passphrase")
+        // existingPassphrase is a web-only hint for SSSS migration; the Rust SDK
+        // handles migration internally on Android. Read and ignore for now.
+        @Suppress("UNUSED_VARIABLE") val existingPassphrase = call.getString("existingPassphrase")
 
         scope.launch {
             try {

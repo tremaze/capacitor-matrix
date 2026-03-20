@@ -43,7 +43,9 @@ const SESSION_KEY = 'matrix_session';
 export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   private client?: MatrixClient;
   private secretStorageKey?: Uint8Array<ArrayBuffer>;
+  private secretStorageKeyId?: string;   // key ID the cached bytes belong to
   private recoveryPassphrase?: string;
+  private fallbackPassphrase?: string;   // old passphrase for SSSS migration in setupRecovery
 
   private readonly _cryptoCallbacks = {
     getSecretStorageKey: async (
@@ -52,12 +54,14 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       const keyId = Object.keys(opts.keys)[0];
       if (!keyId) return null;
 
-      // If we have the raw key cached, use it directly
-      if (this.secretStorageKey) {
+      // Exact match: only return the cached raw key for the key ID it was cached under.
+      // (bootstrapSecretStorage uses createSecretStorageKey for the new key, so this
+      // path is only reached for an already-established key — e.g. after recoverAndSetup.)
+      if (this.secretStorageKey && this.secretStorageKeyId === keyId) {
         return [keyId, this.secretStorageKey];
       }
 
-      // If we have a passphrase, derive the key using the server's stored parameters
+      // Derive from the current passphrase (set during recoverAndSetup)
       if (this.recoveryPassphrase) {
         const keyInfo = opts.keys[keyId] as {
           passphrase?: { salt: string; iterations: number; bits?: number };
@@ -69,7 +73,26 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
             keyInfo.passphrase.iterations,
             keyInfo.passphrase.bits ?? 256,
           );
+          // Cache with the correct key ID for subsequent calls
           this.secretStorageKey = derived;
+          this.secretStorageKeyId = keyId;
+          return [keyId, derived];
+        }
+      }
+
+      // Fallback: derive from the OLD passphrase when bootstrapSecretStorage is
+      // migrating existing cross-signing / backup secrets into a new SSSS.
+      if (this.fallbackPassphrase) {
+        const keyInfo = opts.keys[keyId] as {
+          passphrase?: { salt: string; iterations: number; bits?: number };
+        };
+        if (keyInfo?.passphrase) {
+          const derived = await deriveRecoveryKeyFromPassphrase(
+            this.fallbackPassphrase,
+            keyInfo.passphrase.salt,
+            keyInfo.passphrase.iterations,
+            keyInfo.passphrase.bits ?? 256,
+          );
           return [keyId, derived];
         }
       }
@@ -77,11 +100,12 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       return null;
     },
     cacheSecretStorageKey: (
-      _keyId: string,
+      keyId: string,
       _keyInfo: unknown,
       key: Uint8Array<ArrayBuffer>,
     ): void => {
       this.secretStorageKey = key;
+      this.secretStorageKeyId = keyId;
     },
   };
 
@@ -111,6 +135,13 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   }
 
   async loginWithToken(options: LoginWithTokenOptions): Promise<SessionInfo> {
+    // Stop any previously running client to avoid parallel instances that
+    // would deadlock on the shared IndexedDB crypto store.
+    if (this.client) {
+      this.client.stopClient();
+      this.client = undefined;
+    }
+
     this.client = createClient({
       baseUrl: options.homeserverUrl,
       accessToken: options.accessToken,
@@ -141,6 +172,23 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       this.client = undefined;
     }
     localStorage.removeItem(SESSION_KEY);
+  }
+
+  async clearAllData(): Promise<void> {
+    if (this.client) {
+      this.client.stopClient();
+      this.client = undefined;
+    }
+
+    // Reset all cached crypto state
+    this.secretStorageKey = undefined;
+    this.secretStorageKeyId = undefined;
+    this.recoveryPassphrase = undefined;
+    this.fallbackPassphrase = undefined;
+
+    localStorage.removeItem(SESSION_KEY);
+
+    await this.deleteCryptoStore();
   }
 
   async getSession(): Promise<SessionInfo | null> {
@@ -781,11 +829,50 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async initializeCrypto(): Promise<void> {
     this.requireClient();
-    const userId = this.client!.getUserId();
-    const deviceId = this.client!.getDeviceId();
-    await this.client!.initRustCrypto({
-      cryptoDatabasePrefix: `matrix-js-sdk/${userId}/${deviceId}`,
-    });
+    const cryptoOpts = { cryptoDatabasePrefix: 'matrix-js-sdk' };
+
+    try {
+      await this.client!.initRustCrypto(cryptoOpts);
+    } catch (e: any) {
+      // After logout + re-login the server issues a new deviceId, but the
+      // shared IndexedDB crypto store still references the old one.
+      // Delete the stale store and retry so crypto initialises cleanly.
+      if (e?.message?.includes("account in the store doesn't match")) {
+        await this.deleteCryptoStore();
+        await this.client!.initRustCrypto(cryptoOpts);
+      } else {
+        throw e;
+      }
+    }
+
+    // Flush the initial /keys/query request that initRustCrypto enqueues.
+    // Without this, any call to getIdentity (e.g. via getCrossSigningStatus)
+    // will spin-wait and emit periodic WARN logs until sync processes it.
+    const crypto = this.client!.getCrypto() as any;
+    if (crypto?.outgoingRequestsManager?.doProcessOutgoingRequests) {
+      await crypto.outgoingRequestsManager.doProcessOutgoingRequests();
+    }
+  }
+
+  private async deleteCryptoStore(): Promise<void> {
+    if (typeof indexedDB === 'undefined') return;
+    try {
+      const dbs = await indexedDB.databases();
+      await Promise.all(
+        dbs
+          .filter((db) => db.name?.startsWith('matrix-js-sdk'))
+          .map(
+            (db) =>
+              new Promise<void>((resolve) => {
+                const req = indexedDB.deleteDatabase(db.name!);
+                req.onsuccess = () => resolve();
+                req.onerror = () => resolve();
+              }),
+          ),
+      );
+    } catch {
+      // indexedDB.databases() not available in all environments
+    }
   }
 
   async getEncryptionStatus(): Promise<EncryptionStatus> {
@@ -870,17 +957,52 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     return { importedKeys: result?.imported ?? 0 };
   }
 
-  async setupRecovery(options?: { passphrase?: string }): Promise<RecoveryKeyInfo> {
+  async setupRecovery(options?: {
+    passphrase?: string;
+    existingPassphrase?: string;
+  }): Promise<RecoveryKeyInfo> {
     const crypto = await this.ensureCrypto();
 
     const keyInfo = await crypto.createRecoveryKeyFromPassphrase(options?.passphrase);
+    // Pre-cache the new key bytes. secretStorageKeyId will be set by
+    // cacheSecretStorageKey once bootstrapSecretStorage writes the new key
+    // into SSSS and the SDK calls back.
     this.secretStorageKey = keyInfo.privateKey;
+    this.secretStorageKeyId = undefined;
 
-    await crypto.bootstrapSecretStorage({
-      createSecretStorageKey: async () => keyInfo,
-      setupNewSecretStorage: true,
-      setupNewKeyBackup: true,
-    });
+    // If the caller provides the same or old passphrase, keep it so
+    // getSecretStorageKey can derive the key for the SDK.
+    if (options?.passphrase) {
+      this.recoveryPassphrase = options.passphrase;
+    }
+    // If the caller knows the OLD passphrase, keep it as fallbackPassphrase so
+    // that getSecretStorageKey can decrypt the existing SSSS during
+    // bootstrapSecretStorage's migration of cross-signing / backup secrets.
+    if (options?.existingPassphrase) {
+      this.fallbackPassphrase = options.existingPassphrase;
+    }
+
+    try {
+      const bootstrapPromise = crypto.bootstrapSecretStorage({
+        createSecretStorageKey: async () => keyInfo,
+        setupNewSecretStorage: true,
+        setupNewKeyBackup: true,
+      });
+
+      // Guard against SDK hanging when it can't retrieve the old SSSS key
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error('bootstrapSecretStorage timed out — the old SSSS key could not be retrieved')),
+          30_000,
+        );
+      });
+
+      await Promise.race([bootstrapPromise, timeoutPromise]);
+    } finally {
+      // Always clear transient crypto state so it doesn't bleed into subsequent calls.
+      this.fallbackPassphrase = undefined;
+      this.recoveryPassphrase = undefined;
+    }
 
     return { recoveryKey: keyInfo.encodedPrivateKey ?? '' };
   }
@@ -911,8 +1033,23 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     try {
       await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
     } catch (e) {
-      // Clear stale key material so the next attempt starts fresh
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('decryption key does not match')) {
+        // The passphrase is correct (SSSS decrypted fine), but the backup key
+        // stored in SSSS doesn't match the server's current backup.  This happens
+        // when another client re-created the backup without updating SSSS, or
+        // vice-versa.  Auto-fix by creating a new backup that matches the SSSS key.
+        // recoveryPassphrase / secretStorageKey are still set, so the
+        // getSecretStorageKey callback can decrypt the existing SSSS.
+        await crypto.bootstrapSecretStorage({
+          setupNewKeyBackup: true,
+        });
+        await crypto.checkKeyBackupAndEnable();
+        return;
+      }
+      // Different error — clear state and throw
       this.secretStorageKey = undefined;
+      this.secretStorageKeyId = undefined;
       this.recoveryPassphrase = undefined;
       throw e;
     }
