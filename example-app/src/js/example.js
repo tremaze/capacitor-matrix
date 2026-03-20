@@ -385,6 +385,11 @@ function registerListeners() {
         // Reactions are handled via re-emitted parent event with aggregated reactions
         return;
       }
+      // Skip state events (member joins, room name changes, etc.) — they are
+      // rendered during initial room load and should not be re-appended on sync.
+      if (evt.type.startsWith('m.room.') && evt.type !== 'm.room.message' && evt.type !== 'm.room.encrypted' && evt.type !== 'm.room.redaction') {
+        return;
+      }
       // If event already exists, update it (decryption, reactions, status)
       const existingEl = evt.eventId && document.querySelector(`[data-event-id="${evt.eventId}"]`);
       if (existingEl) {
