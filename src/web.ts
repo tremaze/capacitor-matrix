@@ -285,8 +285,10 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       if (roomId) {
         const room = this.client!.getRoom(roomId);
         if (room) {
-          const typingEvent = room.currentState.getStateEvents('m.typing', '');
-          const userIds: string[] = typingEvent?.getContent()?.user_ids ?? [];
+          const userIds: string[] = room
+            .getMembers()
+            .filter((m: any) => m.typing)
+            .map((m: any) => m.userId);
           this.notifyListeners('typingChanged', { roomId, userIds });
         }
       }
