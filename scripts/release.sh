@@ -32,6 +32,12 @@ echo "Version bumped to $new_version"
 echo "Building..."
 npm run build
 
+# Commit and push version bump
+echo "Committing version bump..."
+git add package.json
+git commit -m "release: $new_version"
+git push
+
 # Publish
 echo "Publishing $new_version to npm..."
 npm publish --access public
