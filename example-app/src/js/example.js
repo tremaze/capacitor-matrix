@@ -6,6 +6,8 @@ let selectedRoomId = null;
 let currentUserId = null;
 let currentRooms = [];
 let _refreshRoomTimer = null;
+// userId → 'online' | 'offline' | 'unavailable'
+const presenceMap = new Map();
 
 function refreshRoomListDebounced() {
   if (_refreshRoomTimer) clearTimeout(_refreshRoomTimer);
@@ -460,6 +462,19 @@ function registerListeners() {
       indicator.textContent = others.length > 0 ? `${others.join(', ')} typing...` : '';
     }
   });
+
+  Matrix.addListener('presenceChanged', (data) => {
+    const status = data.presence?.presence || 'offline';
+    presenceMap.set(data.userId, status);
+    // Update own presence dot in sidebar footer
+    if (data.userId === currentUserId) {
+      updateOwnPresenceDot(status);
+    }
+    // Update all visible presence dots for this user in the message list
+    document.querySelectorAll(`.presence-dot[data-user-id="${data.userId}"]`).forEach((dot) => {
+      dot.className = `presence-dot presence-${status}`;
+    });
+  });
 }
 
 // Resolved by crypto modal when recovery/setup completes or is skipped
@@ -488,9 +503,26 @@ async function startSyncAndLoadRooms() {
   try {
     await Matrix.startSync();
     log('Sync started', 'success');
+    // Set own presence to online
+    Matrix.setPresence({ presence: 'online' }).catch(() => {});
+    presenceMap.set(currentUserId, 'online');
+    updateOwnPresenceDot('online');
   } catch (e) {
     logError('startSync', e);
   }
+}
+
+function updateOwnPresenceDot(status) {
+  let dot = document.getElementById('ownPresenceDot');
+  if (!dot) {
+    const avatar = document.getElementById('userAvatar');
+    if (!avatar) return;
+    avatar.style.position = 'relative';
+    dot = document.createElement('span');
+    dot.id = 'ownPresenceDot';
+    avatar.appendChild(dot);
+  }
+  dot.className = `presence-dot presence-${status}`;
 }
 
 // ── Crypto Setup / Recovery Modal ─────────────────────
@@ -1404,8 +1436,12 @@ function renderMessage(evt, insertBefore = null) {
     }
   }
 
+  const senderPresence = presenceMap.get(evt.senderId) || 'offline';
   group.innerHTML = `
-    <div class="msg-avatar" style="background:${color}">${senderInitials}</div>
+    <div class="msg-avatar" style="background:${color}">
+      ${senderInitials}
+      <span class="presence-dot presence-${senderPresence}" data-user-id="${esc(evt.senderId)}"></span>
+    </div>
     <div class="msg-content-wrap">
       <div class="msg-sender-name">${esc(evt.senderId)}</div>
       <div class="msg-bubble">${bubbleHtml}</div>

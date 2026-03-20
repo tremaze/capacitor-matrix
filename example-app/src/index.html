@@ -380,6 +380,10 @@
         font-size: 13px;
         font-weight: 600;
         color: white;
+        position: relative;
+      }
+      .sidebar-footer .presence-dot {
+        border-color: var(--bg-sidebar);
       }
       .sidebar-footer .user-name {
         flex: 1;
@@ -522,8 +526,22 @@
         color: white;
         flex-shrink: 0;
         align-self: flex-end;
+        position: relative;
       }
       .msg-group.mine .msg-avatar { display: none; }
+
+      /* Presence dots */
+      .presence-dot {
+        position: absolute;
+        bottom: -1px; right: -1px;
+        width: 10px; height: 10px;
+        border-radius: 50%;
+        border: 2px solid var(--bg-primary);
+        background: var(--text-muted);
+      }
+      .presence-online { background: #44b700; }
+      .presence-unavailable { background: #ffa726; }
+      .presence-offline { background: var(--text-muted); }
 
       .msg-content-wrap { min-width: 0; }
       .msg-sender-name {
