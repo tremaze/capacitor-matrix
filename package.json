@@ -46,7 +46,8 @@
     "build:watch": "npx -y nodemon --watch src -e ts --exec \"npm run build || true\"",
     "clean": "rimraf ./dist",
     "watch": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "release": "bash scripts/release.sh"
   },
   "devDependencies": {
     "@capacitor/android": "^8.0.0",
