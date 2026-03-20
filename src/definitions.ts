@@ -32,6 +32,12 @@ export interface SendMessageOptions {
   fileName?: string;
   mimeType?: string;
   fileSize?: number;
+  /** Audio/video duration in milliseconds (sets info.duration per Matrix spec) */
+  duration?: number;
+  /** Image/video width in pixels (sets info.w per Matrix spec) */
+  width?: number;
+  /** Image/video height in pixels (sets info.h per Matrix spec) */
+  height?: number;
 }
 
 // Presence
@@ -51,6 +57,10 @@ export interface TypingEvent {
 
 export interface ReceiptReceivedEvent {
   roomId: string;
+  /** The event that was read */
+  eventId: string;
+  /** The user who sent the read receipt */
+  userId: string;
 }
 
 export interface PresenceChangedEvent {
@@ -64,6 +74,19 @@ export interface EditMessageOptions {
   roomId: string;
   eventId: string;
   newBody: string;
+  /** Required when editing a media message; must match the original msgtype */
+  msgtype?: 'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.audio' | 'm.video' | 'm.file';
+  /** New file to replace the media content (optional for caption-only edits) */
+  fileUri?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  /** Audio/video duration in milliseconds */
+  duration?: number;
+  /** Image/video width in pixels */
+  width?: number;
+  /** Image/video height in pixels */
+  height?: number;
 }
 
 export interface SendReplyOptions {
@@ -75,6 +98,12 @@ export interface SendReplyOptions {
   fileName?: string;
   mimeType?: string;
   fileSize?: number;
+  /** Audio/video duration in milliseconds (sets info.duration per Matrix spec) */
+  duration?: number;
+  /** Image/video width in pixels (sets info.w per Matrix spec) */
+  width?: number;
+  /** Image/video height in pixels (sets info.h per Matrix spec) */
+  height?: number;
 }
 
 // Upload
@@ -142,6 +171,8 @@ export interface DeviceInfo {
   displayName?: string;
   lastSeenTs?: number;
   lastSeenIp?: string;
+  /** Whether this device is verified via cross-signing */
+  isCrossSigningVerified?: boolean;
 }
 
 // Pusher

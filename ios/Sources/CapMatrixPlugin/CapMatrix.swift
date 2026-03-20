@@ -164,7 +164,7 @@ class MatrixSDKBridge {
         onSyncState: @escaping (String) -> Void,
         onMessage: @escaping ([String: Any]) -> Void,
         onRoomUpdate: @escaping (String, [String: Any]) -> Void,
-        onReceipt: @escaping (String) -> Void
+        onReceipt: @escaping (_ roomId: String, _ eventId: String, _ userId: String) -> Void
     ) async throws {
         guard let c = client else {
             throw MatrixBridgeError.notLoggedIn
@@ -213,7 +213,7 @@ class MatrixSDKBridge {
     /// ephemeral events. The Rust SDK receives receipts via sliding sync
     /// but doesn't expose them through readReceipts() on timeline items,
     /// so this parallel connection provides live receipt updates.
-    private func startReceiptSync(onReceipt: @escaping (String) -> Void) {
+    private func startReceiptSync(onReceipt: @escaping (_ roomId: String, _ eventId: String, _ userId: String) -> Void) {
         guard let session = sessionStore.load() else { return }
 
         receiptSyncTask?.cancel()
@@ -395,9 +395,9 @@ class MatrixSDKBridge {
         return components?.url
     }
 
-    /// Parse receipt events from a v2 sync response and fire callbacks.
+    /// Parse receipt events from a v2 sync response and fire callbacks per (eventId, userId) pair.
     private static func processReceiptResponse(
-        data: Data, onReceipt: @escaping (String) -> Void
+        data: Data, onReceipt: @escaping (_ roomId: String, _ eventId: String, _ userId: String) -> Void
     ) {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rooms = (json["rooms"] as? [String: Any])?["join"] as? [String: Any] else {
@@ -410,9 +410,19 @@ class MatrixSDKBridge {
                 continue
             }
             for event in events {
-                guard (event["type"] as? String) == "m.receipt" else { continue }
-                print("[CapMatrix] receiptSync: receipt in \(roomId)")
-                onReceipt(roomId)
+                guard (event["type"] as? String) == "m.receipt",
+                      let content = event["content"] as? [String: Any] else { continue }
+                // Content format: { "$eventId": { "m.read": { "@user:server": { "ts": 123 } } } }
+                for (eventId, receiptTypes) in content {
+                    guard let types = receiptTypes as? [String: Any] else { continue }
+                    for receiptType in ["m.read", "m.read.private"] {
+                        guard let readers = types[receiptType] as? [String: Any] else { continue }
+                        for userId in readers.keys {
+                            print("[CapMatrix] receiptSync: receipt roomId=\(roomId) eventId=\(eventId) userId=\(userId)")
+                            onReceipt(roomId, eventId, userId)
+                        }
+                    }
+                }
             }
         }
     }
@@ -892,6 +902,7 @@ class MatrixSDKBridge {
                 "displayName": device["display_name"] as Any,
                 "lastSeenTs": device["last_seen_ts"] as Any,
                 "lastSeenIp": device["last_seen_ip"] as Any,
+                "isCrossSigningVerified": false, // TODO: wire up Rust SDK per-device verification
             ]
         }
     }

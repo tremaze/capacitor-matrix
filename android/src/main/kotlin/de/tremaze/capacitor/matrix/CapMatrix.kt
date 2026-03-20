@@ -181,7 +181,7 @@ class MatrixSDKBridge(private val context: Context) {
         onSyncState: (String) -> Unit,
         onMessage: (Map<String, Any?>) -> Unit,
         onRoomUpdate: (String, Map<String, Any?>) -> Unit,
-        onReceipt: (String) -> Unit,
+        onReceipt: (roomId: String, eventId: String, userId: String) -> Unit,
     ) {
         val c = requireClient()
         val service = c.syncService().finish()
@@ -634,6 +634,7 @@ class MatrixSDKBridge(private val context: Context) {
                 "displayName" to device.optString("display_name", null),
                 "lastSeenTs" to if (device.has("last_seen_ts")) device.getLong("last_seen_ts") else null,
                 "lastSeenIp" to device.optString("last_seen_ip", null),
+                "isCrossSigningVerified" to false, // TODO: wire up Rust SDK per-device verification
             ))
         }
         return devices
@@ -1108,7 +1109,7 @@ class MatrixSDKBridge(private val context: Context) {
 
     // ── Receipt Sync (parallel v2 sync for read receipts) ──────
 
-    private fun startReceiptSync(onReceipt: (String) -> Unit) {
+    private fun startReceiptSync(onReceipt: (roomId: String, eventId: String, userId: String) -> Unit) {
         val session = sessionStore.load()
         if (session == null) {
             android.util.Log.e("CapMatrix", "receiptSync: NO SESSION FOUND, cannot start receipt sync")
@@ -1250,7 +1251,7 @@ class MatrixSDKBridge(private val context: Context) {
         return sb.toString()
     }
 
-    private fun processReceiptResponse(body: String, onReceipt: (String) -> Unit) {
+    private fun processReceiptResponse(body: String, onReceipt: (roomId: String, eventId: String, userId: String) -> Unit) {
         try {
             val json = org.json.JSONObject(body)
             val join = json.optJSONObject("rooms")?.optJSONObject("join") ?: return
@@ -1259,11 +1260,9 @@ class MatrixSDKBridge(private val context: Context) {
                 val roomData = join.optJSONObject(roomId) ?: continue
                 val ephemeral = roomData.optJSONObject("ephemeral") ?: continue
                 val events = ephemeral.optJSONArray("events") ?: continue
-                var hasReceipts = false
                 for (i in 0 until events.length()) {
                     val event = events.optJSONObject(i) ?: continue
                     if (event.optString("type") != "m.receipt") continue
-                    hasReceipts = true
                     // Content format: { "$eventId": { "m.read": { "@user:server": { "ts": 123 } } } }
                     val content = event.optJSONObject("content") ?: continue
                     val roomReceipts = receiptCache.getOrPut(roomId) { mutableMapOf() }
@@ -1273,17 +1272,15 @@ class MatrixSDKBridge(private val context: Context) {
                         for (rType in listOf("m.read", "m.read.private")) {
                             val readers = receiptTypes.optJSONObject(rType) ?: continue
                             for (userId in readers.keys()) {
-                                // Skip own receipts — we only care about other people reading our messages
-                                if (userId == myUserId) continue
-                                roomReceipts.getOrPut(eventId) { mutableSetOf() }.add(userId)
-                                android.util.Log.d("CapMatrix", "receiptSync: cached receipt roomId=$roomId eventId=$eventId userId=$userId")
+                                // Cache receipts from others for watermark logic
+                                if (userId != myUserId) {
+                                    roomReceipts.getOrPut(eventId) { mutableSetOf() }.add(userId)
+                                }
+                                android.util.Log.d("CapMatrix", "receiptSync: receipt roomId=$roomId eventId=$eventId userId=$userId")
+                                onReceipt(roomId, eventId, userId)
                             }
                         }
                     }
-                }
-                if (hasReceipts) {
-                    android.util.Log.d("CapMatrix", "receiptSync: receipt in $roomId, cache size=${receiptCache[roomId]?.size ?: 0}")
-                    onReceipt(roomId)
                 }
             }
         } catch (e: Exception) {

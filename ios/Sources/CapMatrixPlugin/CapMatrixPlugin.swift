@@ -145,9 +145,9 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
                             self?.notifyListeners("roomUpdated", data: ["roomId": roomId, "summary": summary])
                         }
                     },
-                    onReceipt: { [weak self] roomId in
+                    onReceipt: { [weak self] roomId, eventId, userId in
                         DispatchQueue.main.async {
-                            self?.notifyListeners("receiptReceived", data: ["roomId": roomId])
+                            self?.notifyListeners("receiptReceived", data: ["roomId": roomId, "eventId": eventId, "userId": userId])
                         }
                     }
                 )
@@ -236,6 +236,10 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters")
         }
         let msgtype = call.getString("msgtype") ?? "m.text"
+        // Media info fields — consumed by the bridge when media sending is fully implemented
+        _ = call.getInt("duration")
+        _ = call.getInt("width")
+        _ = call.getInt("height")
 
         Task {
             do {
@@ -677,6 +681,11 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
               let newBody = call.getString("newBody") else {
             return call.reject("Missing required parameters")
         }
+        // Media edit fields — not yet implemented in the native bridge
+        _ = call.getString("msgtype")
+        _ = call.getInt("duration")
+        _ = call.getInt("width")
+        _ = call.getInt("height")
 
         Task {
             do {
@@ -695,6 +704,10 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters")
         }
         let msgtype = call.getString("msgtype") ?? "m.text"
+        // Media info fields — consumed by the bridge when media sending is fully implemented
+        _ = call.getInt("duration")
+        _ = call.getInt("width")
+        _ = call.getInt("height")
 
         Task {
             do {

@@ -196,10 +196,18 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       }
     });
 
-    this.client!.on(RoomEvent.Receipt, (_event: SdkMatrixEvent, room: Room) => {
-      this.notifyListeners('receiptReceived', {
-        roomId: room.roomId,
-      });
+    this.client!.on(RoomEvent.Receipt, (event: SdkMatrixEvent, room: Room) => {
+      const receiptContent = event.getContent() as Record<string, Record<string, Record<string, unknown>>>;
+      for (const [eventId, receiptTypes] of Object.entries(receiptContent)) {
+        const mRead = receiptTypes['m.read'] ?? {};
+        for (const userId of Object.keys(mRead)) {
+          this.notifyListeners('receiptReceived', {
+            roomId: room.roomId,
+            eventId,
+            userId,
+          });
+        }
+      }
       // Re-emit own sent messages with updated read status
       const myUserId = this.client?.getUserId();
       if (myUserId) {
@@ -368,6 +376,9 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         info: {
           mimetype: options.mimeType,
           size: options.fileSize ?? blob.size,
+          ...(options.duration !== undefined && { duration: options.duration }),
+          ...(options.width !== undefined && { w: options.width }),
+          ...(options.height !== undefined && { h: options.height }),
         },
       };
       const res = await this.client!.sendMessage(options.roomId, content as any);
@@ -390,13 +401,42 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async editMessage(options: EditMessageOptions): Promise<{ eventId: string }> {
     this.requireClient();
-    const content: Record<string, unknown> = {
-      msgtype: MsgType.Text,
-      body: `* ${options.newBody}`,
-      'm.new_content': {
-        msgtype: MsgType.Text,
+
+    const msgtype = options.msgtype ?? 'm.text';
+    const mediaTypes = ['m.image', 'm.audio', 'm.video', 'm.file'];
+
+    let newContent: Record<string, unknown>;
+
+    if (mediaTypes.includes(msgtype) && options.fileUri) {
+      const response = await fetch(options.fileUri);
+      const blob = await response.blob();
+      const uploadRes = await this.client!.uploadContent(blob, {
+        name: options.fileName,
+        type: options.mimeType,
+      });
+      newContent = {
+        msgtype,
+        body: options.newBody || options.fileName || 'file',
+        url: uploadRes.content_uri,
+        info: {
+          mimetype: options.mimeType,
+          size: options.fileSize ?? blob.size,
+          ...(options.duration !== undefined && { duration: options.duration }),
+          ...(options.width !== undefined && { w: options.width }),
+          ...(options.height !== undefined && { h: options.height }),
+        },
+      };
+    } else {
+      newContent = {
+        msgtype,
         body: options.newBody,
-      },
+      };
+    }
+
+    const content: Record<string, unknown> = {
+      ...newContent,
+      body: `* ${options.newBody}`,
+      'm.new_content': newContent,
       'm.relates_to': {
         rel_type: 'm.replace',
         event_id: options.eventId,
@@ -429,6 +469,9 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         info: {
           mimetype: options.mimeType,
           size: options.fileSize ?? blob.size,
+          ...(options.duration !== undefined && { duration: options.duration }),
+          ...(options.width !== undefined && { w: options.width }),
+          ...(options.height !== undefined && { h: options.height }),
         },
         'm.relates_to': {
           'm.in_reply_to': {
@@ -689,12 +732,28 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   async getDevices(): Promise<{ devices: DeviceInfo[] }> {
     this.requireClient();
     const res = await this.client!.getDevices();
-    const devices: DeviceInfo[] = (res.devices ?? []).map((d: any) => ({
-      deviceId: d.device_id,
-      displayName: d.display_name ?? undefined,
-      lastSeenTs: d.last_seen_ts ?? undefined,
-      lastSeenIp: d.last_seen_ip ?? undefined,
-    }));
+    const crypto = this.client!.getCrypto();
+    const myUserId = this.client!.getUserId() ?? '';
+    const devices: DeviceInfo[] = await Promise.all(
+      (res.devices ?? []).map(async (d: any) => {
+        let isCrossSigningVerified: boolean | undefined;
+        if (crypto) {
+          try {
+            const status = await crypto.getDeviceVerificationStatus(myUserId, d.device_id);
+            isCrossSigningVerified = status?.crossSigningVerified ?? false;
+          } catch {
+            // ignore — crypto may not be ready
+          }
+        }
+        return {
+          deviceId: d.device_id,
+          displayName: d.display_name ?? undefined,
+          lastSeenTs: d.last_seen_ts ?? undefined,
+          lastSeenIp: d.last_seen_ip ?? undefined,
+          isCrossSigningVerified,
+        };
+      }),
+    );
     return { devices };
   }
 

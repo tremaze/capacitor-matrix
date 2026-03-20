@@ -112,10 +112,10 @@ class MatrixPlugin : Plugin() {
                             JSObject().put("roomId", roomId).put("summary", mapToJSObject(summary)),
                         )
                     },
-                    onReceipt = { roomId ->
+                    onReceipt = { roomId, eventId, userId ->
                         notifyListeners(
                             "receiptReceived",
-                            JSObject().put("roomId", roomId),
+                            JSObject().put("roomId", roomId).put("eventId", eventId).put("userId", userId),
                         )
                     },
                 )
@@ -225,6 +225,10 @@ class MatrixPlugin : Plugin() {
         val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
         val body = call.getString("body") ?: return call.reject("Missing body")
         val msgtype = call.getString("msgtype") ?: "m.text"
+        // Media info fields — consumed by the bridge when media sending is fully implemented
+        @Suppress("UNUSED_VARIABLE") val duration = call.getInt("duration")
+        @Suppress("UNUSED_VARIABLE") val width = call.getInt("width")
+        @Suppress("UNUSED_VARIABLE") val height = call.getInt("height")
 
         scope.launch {
             try {
@@ -241,6 +245,11 @@ class MatrixPlugin : Plugin() {
         val roomId = call.getString("roomId") ?: return call.reject("Missing roomId")
         val eventId = call.getString("eventId") ?: return call.reject("Missing eventId")
         val newBody = call.getString("newBody") ?: return call.reject("Missing newBody")
+        // Media edit fields — not yet implemented in the native bridge
+        @Suppress("UNUSED_VARIABLE") val msgtype = call.getString("msgtype")
+        @Suppress("UNUSED_VARIABLE") val duration = call.getInt("duration")
+        @Suppress("UNUSED_VARIABLE") val width = call.getInt("width")
+        @Suppress("UNUSED_VARIABLE") val height = call.getInt("height")
 
         scope.launch {
             try {
@@ -258,6 +267,10 @@ class MatrixPlugin : Plugin() {
         val body = call.getString("body") ?: return call.reject("Missing body")
         val replyToEventId = call.getString("replyToEventId") ?: return call.reject("Missing replyToEventId")
         val msgtype = call.getString("msgtype") ?: "m.text"
+        // Media info fields — consumed by the bridge when media sending is fully implemented
+        @Suppress("UNUSED_VARIABLE") val duration = call.getInt("duration")
+        @Suppress("UNUSED_VARIABLE") val width = call.getInt("width")
+        @Suppress("UNUSED_VARIABLE") val height = call.getInt("height")
 
         scope.launch {
             try {
