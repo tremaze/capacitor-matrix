@@ -1,6 +1,6 @@
 {
   "name": "@tagea/capacitor-matrix",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "description": "A capacitor plugin wrapping native matrix SDKs",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
