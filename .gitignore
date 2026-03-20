@@ -71,3 +71,4 @@ captures
 
 # Extracted SDK sources
 /main/
+.claude/launch.json
