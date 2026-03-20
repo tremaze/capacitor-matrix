@@ -916,7 +916,6 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   async bootstrapCrossSigning(): Promise<void> {
     const crypto = await this.ensureCrypto();
     await crypto.bootstrapCrossSigning({
-      setupNewCrossSigning: true,
       authUploadDeviceSigningKeys: async (makeRequest) => {
         // UIA flow: attempt with dummy auth, fall back to session-based retry
         try {
@@ -1058,6 +1057,34 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
     // Now that the key is stored locally, activate backup in the running client
     await crypto.checkKeyBackupAndEnable();
+
+    // Restore cross-signing trust for the current device.
+    // With the SSSS key now available (via getSecretStorageKey callback),
+    // bootstrapCrossSigning downloads the existing keys from secret storage
+    // and self-verifies this device.
+    try {
+      await crypto.bootstrapCrossSigning({
+        authUploadDeviceSigningKeys: async (makeRequest) => {
+          try {
+            await makeRequest({ type: 'm.login.dummy' });
+          } catch (e: any) {
+            const session = e?.data?.session;
+            if (session) {
+              await makeRequest({ type: 'm.login.dummy', session });
+            } else {
+              throw e;
+            }
+          }
+        },
+      });
+    } catch {
+      // Non-fatal: cross-signing restore failed, device remains unverified
+    }
+  }
+
+  async verifyDevice(options: { deviceId: string }): Promise<void> {
+    const crypto = await this.ensureCrypto();
+    await crypto.crossSignDevice(options.deviceId);
   }
 
   async resetRecoveryKey(options?: { passphrase?: string }): Promise<RecoveryKeyInfo> {

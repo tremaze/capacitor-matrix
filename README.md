@@ -349,6 +349,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`getPresence(...)`](#getpresence)
 * [`getDevices()`](#getdevices)
 * [`deleteDevice(...)`](#deletedevice)
+* [`verifyDevice(...)`](#verifydevice)
 * [`setPusher(...)`](#setpusher)
 * [`initializeCrypto()`](#initializecrypto)
 * [`getEncryptionStatus()`](#getencryptionstatus)
@@ -867,6 +868,19 @@ deleteDevice(options: { deviceId: string; auth?: Record<string, unknown>; }) => 
 | Param         | Type                                                                                           |
 | ------------- | ---------------------------------------------------------------------------------------------- |
 | **`options`** | <code>{ deviceId: string; auth?: <a href="#record">Record</a>&lt;string, unknown&gt;; }</code> |
+
+--------------------
+
+
+### verifyDevice(...)
+
+```typescript
+verifyDevice(options: { deviceId: string; }) => Promise<void>
+```
+
+| Param         | Type                               |
+| ------------- | ---------------------------------- |
+| **`options`** | <code>{ deviceId: string; }</code> |
 
 --------------------
 

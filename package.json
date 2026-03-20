@@ -84,6 +84,7 @@
     }
   },
   "dependencies": {
+    "@tagea/capacitor-matrix": "file:/Users/lennarttonjes/development/capacitor-matrix/tagea-capacitor-matrix-0.2.0.tgz",
     "matrix-js-sdk": "^41.1.0"
   }
 }

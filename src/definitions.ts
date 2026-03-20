@@ -335,6 +335,7 @@ export interface MatrixPlugin {
   // Device Management
   getDevices(): Promise<{ devices: DeviceInfo[] }>;
   deleteDevice(options: { deviceId: string; auth?: Record<string, unknown> }): Promise<void>;
+  verifyDevice(options: { deviceId: string }): Promise<void>;
 
   // Push
   setPusher(options: PusherOptions): Promise<void>;
