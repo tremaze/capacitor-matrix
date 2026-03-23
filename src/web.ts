@@ -1032,36 +1032,34 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     // Load the backup decryption key from secret storage into the Rust crypto store.
     // This triggers the getSecretStorageKey callback.
     try {
+      console.debug('[CapMatrix] Loading backup key from SSSS…');
       await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
+      console.debug('[CapMatrix] Backup key loaded successfully');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      console.warn('[CapMatrix] loadSessionBackupPrivateKey failed:', msg);
       if (msg.includes('decryption key does not match')) {
-        // The passphrase is correct (SSSS decrypted fine), but the backup key
-        // stored in SSSS doesn't match the server's current backup.  This happens
-        // when another client re-created the backup without updating SSSS, or
-        // vice-versa.  Auto-fix by creating a new backup that matches the SSSS key.
-        // recoveryPassphrase / secretStorageKey are still set, so the
-        // getSecretStorageKey callback can decrypt the existing SSSS.
+        console.info('[CapMatrix] Backup key mismatch — re-creating backup via bootstrapSecretStorage');
         await crypto.bootstrapSecretStorage({
           setupNewKeyBackup: true,
         });
-        await crypto.checkKeyBackupAndEnable();
-        return;
+        console.debug('[CapMatrix] bootstrapSecretStorage complete');
+      } else {
+        this.secretStorageKey = undefined;
+        this.secretStorageKeyId = undefined;
+        this.recoveryPassphrase = undefined;
+        throw e;
       }
-      // Different error — clear state and throw
-      this.secretStorageKey = undefined;
-      this.secretStorageKeyId = undefined;
-      this.recoveryPassphrase = undefined;
-      throw e;
     }
 
-    // Now that the key is stored locally, activate backup in the running client
+    // Activate backup in the running client
+    console.debug('[CapMatrix] Enabling key backup…');
     await crypto.checkKeyBackupAndEnable();
+    const backupVersion = await crypto.getActiveSessionBackupVersion();
+    console.debug('[CapMatrix] Key backup version:', backupVersion);
 
     // Restore cross-signing trust for the current device.
-    // With the SSSS key now available (via getSecretStorageKey callback),
-    // bootstrapCrossSigning downloads the existing keys from secret storage
-    // and self-verifies this device.
+    console.debug('[CapMatrix] Bootstrapping cross-signing…');
     try {
       await crypto.bootstrapCrossSigning({
         authUploadDeviceSigningKeys: async (makeRequest) => {
@@ -1077,9 +1075,15 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
           }
         },
       });
-    } catch {
-      // Non-fatal: cross-signing restore failed, device remains unverified
+      console.debug('[CapMatrix] Cross-signing bootstrap succeeded');
+    } catch (e) {
+      console.error('[CapMatrix] Cross-signing bootstrap failed:', e);
     }
+
+    // Log final status
+    const csReady = await crypto.isCrossSigningReady();
+    const csStatus = await crypto.getCrossSigningStatus();
+    console.debug('[CapMatrix] Final status — isCrossSigningReady:', csReady, 'csStatus:', JSON.stringify(csStatus));
   }
 
   async verifyDevice(options: { deviceId: string }): Promise<void> {
