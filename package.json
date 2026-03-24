@@ -13,7 +13,7 @@
     "ios/Sources",
     "ios/Tests",
     "Package.swift",
-    "TremazeCapacitorMatrix.podspec"
+    "TageaCapacitorMatrix.podspec"
   ],
   "author": "tremaze GmbH",
   "license": "MIT",
@@ -31,7 +31,7 @@
   ],
   "scripts": {
     "verify": "npm run verify:ios && npm run verify:android && npm run verify:web",
-    "verify:ios": "xcodebuild -scheme TremazeCapacitorMatrix -destination generic/platform=iOS",
+    "verify:ios": "xcodebuild -scheme TageaCapacitorMatrix -destination generic/platform=iOS",
     "verify:android": "cd android && ./gradlew clean build test && cd ..",
     "verify:web": "npm run build && npm run test",
     "test": "vitest run",

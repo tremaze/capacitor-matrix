@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "TremazeCapacitorMatrix",
+    name: "TageaCapacitorMatrix",
     platforms: [.iOS(.v16)],
     products: [
         .library(
-            name: "TremazeCapacitorMatrix",
+            name: "TageaCapacitorMatrix",
             targets: ["CapMatrixPlugin"])
     ],
     dependencies: [
