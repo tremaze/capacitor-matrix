@@ -127,7 +127,7 @@ class MatrixSDKBridge {
     func logout() async throws {
         receiptSyncTask?.cancel()
         receiptSyncTask = nil
-        try await syncService?.stop()
+        await syncService?.stop()
         syncService = nil
         syncStateHandle = nil
         timelineListenerHandles.removeAll()
@@ -172,11 +172,14 @@ class MatrixSDKBridge {
 
         // Enable Rust SDK tracing to diagnose sync errors
         let tracingConfig = TracingConfiguration(
-            filter: "warn,matrix_sdk=debug,matrix_sdk_ui=debug",
+            logLevel: .warn,
+            traceLogPacks: [],
+            extraTargets: ["matrix_sdk", "matrix_sdk_ui"],
             writeToStdoutOrSystem: true,
-            writeToFiles: nil
+            writeToFiles: nil,
+            sentryDsn: nil
         )
-        setupTracing(config: tracingConfig)
+        try? initPlatform(config: tracingConfig, useLightweightTokioRuntime: false)
 
         print("[CapMatrix] startSync: building sync service...")
         let service = try await c.syncService().finish()
@@ -456,7 +459,7 @@ class MatrixSDKBridge {
                 subscriptionLock.lock()
                 timelineListenerHandles.append(handle)
                 subscriptionLock.unlock()
-                print("[CapMatrix]   room \(roomId): listener added ✓")
+                print("[CapMatrix]   room \(roomId): listener added")
             } catch {
                 print("[CapMatrix]   room \(roomId): FAILED: \(error)")
             }
@@ -464,7 +467,7 @@ class MatrixSDKBridge {
     }
 
     func stopSync() async throws {
-        try await syncService?.stop()
+        await syncService?.stop()
         syncStateHandle = nil
         subscribedRoomIds.removeAll()
         timelineListenerHandles.removeAll()
@@ -585,7 +588,9 @@ class MatrixSDKBridge {
     func editMessage(roomId: String, eventId: String, newBody: String) async throws -> String {
         let room = try requireRoom(roomId: roomId)
         let content = messageEventContentFromMarkdown(md: newBody)
-        try await room.edit(eventId: eventId, newContent: content)
+        let editContent = EditedContent.roomMessage(content: content)
+        let timeline = try await getOrCreateTimeline(room: room)
+        try await timeline.edit(eventOrTransactionId: .eventId(eventId: eventId), newContent: editContent)
         return ""
     }
 
@@ -730,24 +735,14 @@ class MatrixSDKBridge {
 
     func redactEvent(roomId: String, eventId: String, reason: String?) async throws {
         let room = try requireRoom(roomId: roomId)
-        try await room.redact(eventId: eventId, reason: reason)
+        let timeline = try await getOrCreateTimeline(room: room)
+        try await timeline.redactEvent(eventOrTransactionId: .eventId(eventId: eventId), reason: reason)
     }
 
     func sendReaction(roomId: String, eventId: String, key: String) async throws {
         let room = try requireRoom(roomId: roomId)
         let timeline = try await getOrCreateTimeline(room: room)
-
-        // toggleReaction needs the timeline item's uniqueId, not the eventId
-        // addListener immediately fires a Reset diff with current items
-        let collector = TimelineItemCollector(roomId: roomId)
-        let handle = await timeline.addListener(listener: collector)
-        await collector.waitForUpdate()
-        handle.cancel()
-
-        guard let uniqueId = collector.uniqueIdForEvent(eventId) else {
-            throw MatrixBridgeError.notSupported("Could not find timeline item for event \(eventId)")
-        }
-        try await timeline.toggleReaction(uniqueId: uniqueId, key: key)
+        _ = try await timeline.toggleReaction(itemId: .eventId(eventId: eventId), key: key)
     }
 
     // MARK: - User Discovery
@@ -1002,6 +997,7 @@ class MatrixSDKBridge {
         let listener = NoopEnableRecoveryProgressListener()
         let key = try await c.encryption().enableRecovery(
             waitForBackupsToUpload: false,
+            passphrase: passphrase,
             progressListener: listener
         )
         return ["recoveryKey": key]
@@ -1054,7 +1050,7 @@ class MatrixSDKBridge {
 
     private static func serializeRoom(_ room: Room) async throws -> [String: Any] {
         let info = try await room.roomInfo()
-        let encrypted = (try? room.isEncrypted()) ?? false
+        let encrypted = await room.isEncrypted()
         let membership: String = {
             switch room.membership() {
             case .joined: return "join"
@@ -1098,6 +1094,18 @@ class MatrixSDKBridge {
 
 // MARK: - Timeline Serialization Helpers
 
+/// Extract the event ID string from an EventOrTransactionId enum.
+private func extractEventId(_ eventOrTxnId: EventOrTransactionId) -> String? {
+    switch eventOrTxnId {
+    case .eventId(let eventId):
+        return eventId
+    case .transactionId(let transactionId):
+        return transactionId
+    @unknown default:
+        return nil
+    }
+}
+
 private func extractMediaUrl(source: MediaSource, into contentDict: inout [String: Any]) {
     let url = source.url()
     if !url.isEmpty {
@@ -1120,24 +1128,20 @@ private func serializeTimelineItem(_ item: TimelineItem, roomId: String) -> [Str
 }
 
 private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: String) -> [String: Any]? {
-    let eventId: String
-    if let eid = eventItem.eventId() {
-        eventId = eid
-    } else if let tid = eventItem.transactionId() {
-        eventId = tid
-    } else {
+    guard let eventId = extractEventId(eventItem.eventOrTransactionId) else {
         return nil
     }
 
     var contentDict: [String: Any] = [:]
     var eventType = "m.room.message"
 
-    let content = eventItem.content()
-    switch content.kind() {
-    case .message:
-        if let msg = content.asMessage() {
-            contentDict["body"] = msg.body()
-            switch msg.msgtype() {
+    let content = eventItem.content
+    switch content {
+    case .msgLike(let msgLikeContent):
+        switch msgLikeContent.kind {
+        case .message(let messageContent):
+            contentDict["body"] = messageContent.body
+            switch messageContent.msgType {
             case .text:
                 contentDict["msgtype"] = "m.text"
             case .image(let imgContent):
@@ -1162,39 +1166,41 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
             default:
                 contentDict["msgtype"] = "m.text"
             }
+        case .unableToDecrypt:
+            contentDict["body"] = "Unable to decrypt message"
+            contentDict["msgtype"] = "m.text"
+            contentDict["encrypted"] = true
+        case .redacted:
+            eventType = "m.room.redaction"
+            contentDict["body"] = "Message deleted"
+        default:
+            eventType = "m.room.unknown"
         }
-    case .unableToDecrypt:
-        contentDict["body"] = "Unable to decrypt message"
-        contentDict["msgtype"] = "m.text"
-        contentDict["encrypted"] = true
-    case .redactedMessage:
-        eventType = "m.room.redaction"
-        contentDict["body"] = "Message deleted"
+
+        // Reactions from MsgLikeContent
+        let reactions = msgLikeContent.reactions
+        if !reactions.isEmpty {
+            contentDict["reactions"] = reactions.map { r in
+                [
+                    "key": r.key,
+                    "count": r.senders.count,
+                    "senders": r.senders.map { $0.senderId },
+                ] as [String: Any]
+            }
+        }
     default:
         eventType = "m.room.unknown"
     }
 
-    // Reactions
-    let reactions = eventItem.reactions()
-    if !reactions.isEmpty {
-        contentDict["reactions"] = reactions.map { r in
-            [
-                "key": r.key,
-                "count": r.senders.count,
-                "senders": r.senders.map { $0.senderId },
-            ] as [String: Any]
-        }
-    }
-
     // Delivery/read status
     var status: String = "sent"
-    if let sendState = eventItem.localSendState() {
+    if let sendState = eventItem.localSendState {
         switch sendState {
         case .notSentYet:
             status = "sending"
-        case .sendingFailed(_, _):
+        case .sendingFailed:
             status = "sending"
-        case .sent(_):
+        case .sent:
             // Check read receipts below
             break
         default:
@@ -1203,12 +1209,12 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
     }
 
     var readBy: [String]? = nil
-    let receipts = eventItem.readReceipts()
+    let receipts = eventItem.readReceipts
     if !receipts.isEmpty {
-        print("[CapMatrix] readReceipts for \(eventId): \(receipts.keys) sender=\(eventItem.sender())")
+        print("[CapMatrix] readReceipts for \(eventId): \(receipts.keys) sender=\(eventItem.sender)")
     }
     if status == "sent" {
-        let others = receipts.keys.filter { $0 != eventItem.sender() }
+        let others = receipts.keys.filter { $0 != eventItem.sender }
         if !others.isEmpty {
             status = "read"
             readBy = Array(others)
@@ -1218,10 +1224,10 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
     return [
         "eventId": eventId,
         "roomId": roomId,
-        "senderId": eventItem.sender(),
+        "senderId": eventItem.sender,
         "type": eventType,
         "content": contentDict,
-        "originServerTs": eventItem.timestamp(),
+        "originServerTs": eventItem.timestamp,
         "status": status,
         "readBy": readBy as Any,
     ]
@@ -1243,11 +1249,8 @@ class LiveTimelineListener: TimelineListener {
     func onUpdate(diff: [TimelineDiff]) {
         print("[CapMatrix] LiveTimelineListener onUpdate for \(roomId): \(diff.count) diffs")
         for d in diff {
-            let change = d.change()
-            print("[CapMatrix]   diff type: \(change)")
-            switch change {
-            case .reset:
-                let items = d.reset() ?? []
+            switch d {
+            case .reset(let items):
                 print("[CapMatrix]   Reset: \(items.count) items")
                 items.forEach { item in
                     if let event = serializeTimelineItem(item, roomId: roomId) {
@@ -1256,8 +1259,7 @@ class LiveTimelineListener: TimelineListener {
                     }
                 }
                 onRoomUpdate(roomId, ["roomId": roomId])
-            case .append:
-                let items = d.append() ?? []
+            case .append(let items):
                 print("[CapMatrix]   Append: \(items.count) items")
                 items.forEach { item in
                     if let event = serializeTimelineItem(item, roomId: roomId) {
@@ -1266,44 +1268,45 @@ class LiveTimelineListener: TimelineListener {
                     }
                 }
                 onRoomUpdate(roomId, ["roomId": roomId])
-            case .pushBack:
-                if let item = d.pushBack() {
-                    let isLocalEcho = item.asEvent()?.eventId() == nil && item.asEvent()?.transactionId() != nil
-                    print("[CapMatrix]   PushBack: localEcho=\(isLocalEcho)")
-                    if !isLocalEcho, let event = serializeTimelineItem(item, roomId: roomId) {
-                        print("[CapMatrix]   PushBack item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil")")
-                        onMessage(event)
-                    }
-                    onRoomUpdate(roomId, ["roomId": roomId])
-                }
-            case .pushFront:
-                if let item = d.pushFront() {
-                    if let event = serializeTimelineItem(item, roomId: roomId) {
-                        print("[CapMatrix]   PushFront item: \(event["eventId"] ?? "nil")")
-                        onMessage(event)
-                    }
-                    onRoomUpdate(roomId, ["roomId": roomId])
-                }
-            case .set:
-                if let data = d.set() {
-                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
-                        print("[CapMatrix]   Set item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil") status=\(event["status"] ?? "nil") readBy=\(event["readBy"] ?? "nil")")
-                        onMessage(event)
-                        // If this event has readBy data, trigger roomUpdated
-                        // so the app can refresh receipt status for all messages
-                        if let rb = event["readBy"] as? [String], !rb.isEmpty {
-                            onRoomUpdate(roomId, ["roomId": roomId])
-                        }
+            case .pushBack(let item):
+                let isLocalEcho = item.asEvent().map { extractEventId($0.eventOrTransactionId) } != nil
+                    && item.asEvent()?.eventOrTransactionId is EventOrTransactionId
+                // Check if this is a local echo (transaction ID, no event ID yet)
+                let eventItem = item.asEvent()
+                var skipLocalEcho = false
+                if let ei = eventItem {
+                    if case .transactionId = ei.eventOrTransactionId {
+                        skipLocalEcho = true
                     }
                 }
-            case .insert:
-                if let data = d.insert() {
-                    if let event = serializeTimelineItem(data.item, roomId: roomId) {
-                        print("[CapMatrix]   Insert item: \(event["eventId"] ?? "nil")")
-                        onMessage(event)
-                    }
-                    onRoomUpdate(roomId, ["roomId": roomId])
+                print("[CapMatrix]   PushBack: localEcho=\(skipLocalEcho)")
+                if !skipLocalEcho, let event = serializeTimelineItem(item, roomId: roomId) {
+                    print("[CapMatrix]   PushBack item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil")")
+                    onMessage(event)
                 }
+                onRoomUpdate(roomId, ["roomId": roomId])
+            case .pushFront(let item):
+                if let event = serializeTimelineItem(item, roomId: roomId) {
+                    print("[CapMatrix]   PushFront item: \(event["eventId"] ?? "nil")")
+                    onMessage(event)
+                }
+                onRoomUpdate(roomId, ["roomId": roomId])
+            case .set(let index, let item):
+                if let event = serializeTimelineItem(item, roomId: roomId) {
+                    print("[CapMatrix]   Set item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil") status=\(event["status"] ?? "nil") readBy=\(event["readBy"] ?? "nil")")
+                    onMessage(event)
+                    // If this event has readBy data, trigger roomUpdated
+                    // so the app can refresh receipt status for all messages
+                    if let rb = event["readBy"] as? [String], !rb.isEmpty {
+                        onRoomUpdate(roomId, ["roomId": roomId])
+                    }
+                }
+            case .insert(let index, let item):
+                if let event = serializeTimelineItem(item, roomId: roomId) {
+                    print("[CapMatrix]   Insert item: \(event["eventId"] ?? "nil")")
+                    onMessage(event)
+                }
+                onRoomUpdate(roomId, ["roomId": roomId])
             case .remove:
                 break // Index-based removal, handled by JS layer
             default:
@@ -1401,46 +1404,50 @@ class TimelineItemCollector: TimelineListener {
         var continuation: CheckedContinuation<Bool, Never>?
         lock.lock()
         for d in diff {
-            switch d.change() {
-            case .reset:
+            switch d {
+            case .reset(let items):
                 _items.removeAll()
                 _uniqueIdMap.removeAll()
-                d.reset()?.forEach { item in
+                items.forEach { item in
                     trackUniqueId(item)
                     _items.append(serializeTimelineItem(item, roomId: roomId))
                 }
-            case .append:
-                d.append()?.forEach { item in
+            case .append(let items):
+                items.forEach { item in
                     trackUniqueId(item)
                     _items.append(serializeTimelineItem(item, roomId: roomId))
                 }
-            case .pushBack:
-                if let item = d.pushBack() {
-                    trackUniqueId(item)
-                    _items.append(serializeTimelineItem(item, roomId: roomId))
+            case .pushBack(let item):
+                trackUniqueId(item)
+                _items.append(serializeTimelineItem(item, roomId: roomId))
+            case .pushFront(let item):
+                trackUniqueId(item)
+                _items.insert(serializeTimelineItem(item, roomId: roomId), at: 0)
+            case .set(let index, let item):
+                trackUniqueId(item)
+                let idx = Int(index)
+                if idx >= 0 && idx < _items.count {
+                    _items[idx] = serializeTimelineItem(item, roomId: roomId)
                 }
-            case .pushFront:
-                if let item = d.pushFront() {
-                    trackUniqueId(item)
-                    _items.insert(serializeTimelineItem(item, roomId: roomId), at: 0)
-                }
-            case .set:
-                if let data = d.set() {
-                    trackUniqueId(data.item)
-                    let idx = Int(data.index)
-                    if idx >= 0 && idx < _items.count {
-                        _items[idx] = serializeTimelineItem(data.item, roomId: roomId)
-                    }
-                }
-            case .insert:
-                if let data = d.insert() {
-                    trackUniqueId(data.item)
-                    let idx = min(Int(data.index), _items.count)
-                    _items.insert(serializeTimelineItem(data.item, roomId: roomId), at: idx)
-                }
+            case .insert(let index, let item):
+                trackUniqueId(item)
+                let idx = min(Int(index), _items.count)
+                _items.insert(serializeTimelineItem(item, roomId: roomId), at: idx)
             case .clear:
                 _items.removeAll()
                 _uniqueIdMap.removeAll()
+            case .remove(let index):
+                let idx = Int(index)
+                if idx >= 0 && idx < _items.count {
+                    _items.remove(at: idx)
+                }
+            case .truncate(let length):
+                let len = Int(length)
+                while _items.count > len { _items.removeLast() }
+            case .popBack:
+                if !_items.isEmpty { _items.removeLast() }
+            case .popFront:
+                if !_items.isEmpty { _items.removeFirst() }
             default:
                 break
             }
@@ -1454,12 +1461,9 @@ class TimelineItemCollector: TimelineListener {
 
     private func trackUniqueId(_ item: TimelineItem) {
         guard let eventItem = item.asEvent() else { return }
-        let uniqueId = item.uniqueId()
-        if let eid = eventItem.eventId() {
+        let uniqueId = item.uniqueId().id
+        if let eid = extractEventId(eventItem.eventOrTransactionId) {
             _uniqueIdMap[eid] = uniqueId
-        }
-        if let tid = eventItem.transactionId() {
-            _uniqueIdMap[tid] = uniqueId
         }
     }
 }
