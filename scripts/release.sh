@@ -34,12 +34,22 @@ npm run build
 
 # Commit and push version bump
 echo "Committing version bump..."
-git add package.json
+git add package.json package-lock.json
 git commit -m "release: $new_version"
+
+# Create git tag
+echo "Creating git tag $new_version..."
+git tag "$new_version"
+
 git push
+git push origin "$new_version"
 
 # Publish
 echo "Publishing $new_version to npm..."
 npm publish --access public
+
+# Create GitHub release
+echo "Creating GitHub release..."
+gh release create "$new_version" --title "$new_version" --generate-notes
 
 echo "Released $new_version"
