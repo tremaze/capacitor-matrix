@@ -469,7 +469,7 @@ describe('startSync', () => {
 
     const mockEvt = createMockSdkEvent({ eventId: '$msg1', content: { body: 'test' } });
     const mockRoom = createMockRoom({ roomId: '!r:l' });
-    emitEvent('Room.timeline', mockEvt, mockRoom);
+    emitEvent('Room.timeline', mockEvt, mockRoom, false, false, { liveEvent: true });
 
     expect(listener).toHaveBeenCalledWith(expect.objectContaining({
       event: expect.objectContaining({ eventId: '$msg1' }),

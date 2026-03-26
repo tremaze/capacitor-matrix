@@ -215,7 +215,10 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       });
     });
 
-    this.client!.on(RoomEvent.Timeline, (event: SdkMatrixEvent, room: Room | undefined) => {
+    this.client!.on(RoomEvent.Timeline, (event: SdkMatrixEvent, room: Room | undefined, toStartOfTimeline: boolean | undefined) => {
+      // Skip back-paginated events — they're loaded via getRoomMessages.
+      if (toStartOfTimeline) return;
+
       this.notifyListeners('messageReceived', {
         event: this.serializeEvent(event, room?.roomId),
       });
@@ -572,7 +575,6 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         return t !== EventType.Reaction && t !== EventType.RoomRedaction;
       });
       const events: MatrixEvent[] = displayableEvents
-        .slice(-limit)
         .map((e) => this.serializeEvent(e, options.roomId))
         .sort((a, b) => a.originServerTs - b.originServerTs);
       const backToken = timeline.getPaginationToken(Direction.Backward) ?? undefined;
