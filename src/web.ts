@@ -1,4 +1,5 @@
 import { WebPlugin } from '@capacitor/core';
+import { initAsync as initCryptoWasm } from '@matrix-org/matrix-sdk-crypto-wasm';
 import {
   createClient,
   ClientEvent,
@@ -10,9 +11,9 @@ import {
   RelationType,
   UserEvent,
 } from 'matrix-js-sdk';
-import { decodeRecoveryKey } from 'matrix-js-sdk/lib/crypto-api/recovery-key';
-import { deriveRecoveryKeyFromPassphrase } from 'matrix-js-sdk/lib/crypto-api/key-passphrase';
 import type { MatrixClient, Room, MatrixEvent as SdkMatrixEvent, User } from 'matrix-js-sdk';
+import { deriveRecoveryKeyFromPassphrase } from 'matrix-js-sdk/lib/crypto-api/key-passphrase';
+import { decodeRecoveryKey } from 'matrix-js-sdk/lib/crypto-api/recovery-key';
 
 import type {
   MatrixPlugin,
@@ -831,6 +832,19 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async initializeCrypto(): Promise<void> {
     this.requireClient();
+
+    // Pre-initialize the WASM module with a root-relative URL before
+    // matrix-js-sdk tries with a URL relative to the bundled chunk
+    // (which breaks in bundlers like esbuild/Vite that relocate modules).
+    // The host app must serve the WASM file at /matrix_sdk_crypto_wasm_bg.wasm
+    // (e.g. via an asset copy in angular.json / project.json).
+    // initAsync's internal guard ensures this is a no-op if already loaded.
+    try {
+      await initCryptoWasm(new URL('/matrix_sdk_crypto_wasm_bg.wasm', window.location.origin));
+    } catch (e) {
+      console.warn('[CapMatrix] WASM pre-init failed, falling back to default URL:', e);
+    }
+
     const cryptoOpts = { cryptoDatabasePrefix: 'matrix-js-sdk' };
 
     try {
@@ -984,21 +998,11 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     }
 
     try {
-      const bootstrapPromise = crypto.bootstrapSecretStorage({
+      await crypto.bootstrapSecretStorage({
         createSecretStorageKey: async () => keyInfo,
         setupNewSecretStorage: true,
         setupNewKeyBackup: true,
       });
-
-      // Guard against SDK hanging when it can't retrieve the old SSSS key
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(
-          () => reject(new Error('bootstrapSecretStorage timed out — the old SSSS key could not be retrieved')),
-          30_000,
-        );
-      });
-
-      await Promise.race([bootstrapPromise, timeoutPromise]);
     } finally {
       // Always clear transient crypto state so it doesn't bleed into subsequent calls.
       this.fallbackPassphrase = undefined;
@@ -1235,11 +1239,15 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       ? (unsignedData as Record<string, unknown>)
       : undefined;
 
+    // Include state_key for state events (e.g. target user in m.room.member)
+    const sk = event.getStateKey?.();
+
     return {
       eventId: eventId ?? '',
       roomId,
       senderId: sender ?? '',
       type: event.getType(),
+      ...(sk !== undefined && { stateKey: sk }),
       content,
       originServerTs: event.getTs(),
       status,

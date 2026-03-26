@@ -515,6 +515,20 @@ class MatrixPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun verifyDevice(call: PluginCall) {
+        val deviceId = call.getString("deviceId") ?: return call.reject("Missing deviceId")
+
+        scope.launch {
+            try {
+                bridge.verifyDevice(deviceId)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "verifyDevice failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
     fun setPusher(call: PluginCall) {
         call.reject("setPusher is not yet supported on this platform")
     }
@@ -733,12 +747,16 @@ class MatrixPlugin : Plugin() {
 
     @PluginMethod
     fun recoverAndSetup(call: PluginCall) {
-        val recoveryKey = call.getString("recoveryKey") ?: call.getString("passphrase")
-            ?: return call.reject("Missing recoveryKey or passphrase")
+        val recoveryKey = call.getString("recoveryKey")
+        val passphrase = call.getString("passphrase")
+
+        if (recoveryKey == null && passphrase == null) {
+            return call.reject("Missing recoveryKey or passphrase")
+        }
 
         scope.launch {
             try {
-                bridge.recoverAndSetup(recoveryKey)
+                bridge.recoverAndSetup(recoveryKey = recoveryKey, passphrase = passphrase)
                 call.resolve()
             } catch (e: Exception) {
                 call.reject(e.message ?: "recoverAndSetup failed", e)

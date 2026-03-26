@@ -56,6 +56,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getDevices", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteDevice", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPusher", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "verifyDevice", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clearAllData", returnType: CAPPluginReturnPromise),
     ]
 
@@ -422,13 +423,16 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func recoverAndSetup(_ call: CAPPluginCall) {
-        guard let recoveryKey = call.getString("recoveryKey") ?? call.getString("passphrase") else {
+        let recoveryKey = call.getString("recoveryKey")
+        let passphrase = call.getString("passphrase")
+
+        guard recoveryKey != nil || passphrase != nil else {
             return call.reject("Missing recoveryKey or passphrase")
         }
 
         Task {
             do {
-                try await matrixBridge.recoverAndSetup(recoveryKey: recoveryKey)
+                try await matrixBridge.recoverAndSetup(recoveryKey: recoveryKey, passphrase: passphrase)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)
@@ -784,6 +788,21 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         Task {
             do {
                 try await matrixBridge.deleteDevice(deviceId: deviceId)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func verifyDevice(_ call: CAPPluginCall) {
+        guard let deviceId = call.getString("deviceId") else {
+            return call.reject("Missing deviceId")
+        }
+
+        Task {
+            do {
+                try await matrixBridge.verifyDevice(deviceId: deviceId)
                 call.resolve()
             } catch {
                 call.reject(error.localizedDescription)

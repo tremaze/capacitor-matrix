@@ -84,6 +84,6 @@
     }
   },
   "dependencies": {
-    "matrix-js-sdk": "^41.1.0"
+    "matrix-js-sdk": "^41.2.0"
   }
 }

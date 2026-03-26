@@ -63,6 +63,18 @@ export function createMockMatrixClient() {
     setPresence: vi.fn().mockResolvedValue(undefined),
     getUser: vi.fn().mockReturnValue(null),
 
+    // User / session info
+    getUserId: vi.fn().mockReturnValue('@test:localhost'),
+    getHomeserverUrl: vi.fn().mockReturnValue('https://localhost'),
+    getAccessToken: vi.fn().mockReturnValue('mock-token'),
+    getAccountData: vi.fn().mockReturnValue(null),
+
+    // Read receipts
+    sendReadReceipt: vi.fn().mockResolvedValue(undefined),
+
+    // Scrollback
+    scrollback: vi.fn().mockResolvedValue(undefined),
+
     // Crypto
     initRustCrypto: vi.fn().mockResolvedValue(undefined),
     getCrypto: vi.fn().mockReturnValue(null),
@@ -126,6 +138,7 @@ export function createMockRoom(overrides: Partial<{
     hasEncryptionStateEvent: vi.fn().mockReturnValue(overrides.isEncrypted ?? false),
     getUnreadNotificationCount: vi.fn().mockReturnValue(overrides.unreadCount ?? 0),
     getLastActiveTimestamp: vi.fn().mockReturnValue(overrides.lastActiveTs ?? 1700000000000),
+    getMyMembership: vi.fn().mockReturnValue('join'),
     currentState: {
       getStateEvents: vi.fn().mockImplementation((type: string) => {
         if (type === 'm.room.topic') {
@@ -145,12 +158,29 @@ export function createMockRoom(overrides: Partial<{
         userId: m.userId,
         name: m.name,
         membership: m.membership,
+        getMxcAvatarUrl: vi.fn().mockReturnValue(null),
       })),
+    ),
+    getJoinedMembers: vi.fn().mockReturnValue(
+      members
+        .filter((m) => m.membership === 'join')
+        .map((m) => ({
+          userId: m.userId,
+          name: m.name,
+          membership: m.membership,
+          getMxcAvatarUrl: vi.fn().mockReturnValue(null),
+        })),
     ),
     getLiveTimeline: vi.fn().mockReturnValue({
       getEvents: vi.fn().mockReturnValue([]),
       getPaginationToken: vi.fn().mockReturnValue(null),
     }),
+    findEventById: vi.fn().mockReturnValue(null),
+    hasUserReadEvent: vi.fn().mockReturnValue(false),
+    relations: {
+      getChildEventsForEvent: vi.fn().mockReturnValue(null),
+    },
+    getAvatarUrl: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -169,5 +199,11 @@ export function createMockSdkEvent(overrides: Partial<{
     getType: vi.fn().mockReturnValue(overrides.type ?? 'm.room.message'),
     getContent: vi.fn().mockReturnValue(overrides.content ?? { body: 'hello', msgtype: 'm.text' }),
     getTs: vi.fn().mockReturnValue(overrides.ts ?? 1700000000000),
+    isRedacted: vi.fn().mockReturnValue(false),
+    isBeingDecrypted: vi.fn().mockReturnValue(false),
+    getUnsigned: vi.fn().mockReturnValue(undefined),
+    getStateKey: vi.fn().mockReturnValue(undefined),
+    getAssociatedId: vi.fn().mockReturnValue(undefined),
+    status: null,
   };
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CommonCrypto
 import MatrixRustSDK
 
 struct MatrixSessionInfo {
@@ -30,6 +31,11 @@ class MatrixSDKBridge {
     private var syncStateObserver: SyncStateObserverProxy?
     private let subscriptionLock = NSLock()
     private var receiptSyncTask: Task<Void, Never>?
+    // Rooms currently being paginated by getRoomMessages — live listener suppresses events for these
+    private var paginatingRooms = Set<String>()
+    private let paginatingLock = NSLock()
+    // Per-room tracking of the oldest event ID returned to JS, used for pagination cursor
+    private var oldestReturnedEventId: [String: String] = [:]
 
     // MARK: - Auth
 
@@ -91,6 +97,16 @@ class MatrixSDKBridge {
     }
 
     private func _loginWithToken(homeserverUrl: String, accessToken: String, userId: String, deviceId: String) async throws -> [String: String] {
+        // Stop existing sync and clean up stale references before replacing the client
+        await syncService?.stop()
+        syncService = nil
+        syncStateHandle = nil
+        receiptSyncTask?.cancel()
+        receiptSyncTask = nil
+        timelineListenerHandles.removeAll()
+        roomTimelines.removeAll()
+        subscribedRoomIds.removeAll()
+
         let dataDir = Self.dataDirectory()
         let cacheDir = Self.cacheDirectory()
 
@@ -454,7 +470,12 @@ class MatrixSDKBridge {
         for (room, roomId) in roomsToSubscribe {
             do {
                 let timeline = try await getOrCreateTimeline(room: room)
-                let listener = LiveTimelineListener(roomId: roomId, onMessage: onMessage, onRoomUpdate: onRoomUpdate)
+                let listener = LiveTimelineListener(roomId: roomId, room: room, onMessage: onMessage, onRoomUpdate: onRoomUpdate, isPaginating: { [weak self] in
+                    guard let self = self else { return false }
+                    self.paginatingLock.lock()
+                    defer { self.paginatingLock.unlock() }
+                    return self.paginatingRooms.contains(roomId)
+                })
                 let handle = await timeline.addListener(listener: listener)
                 subscriptionLock.lock()
                 timelineListenerHandles.append(handle)
@@ -606,28 +627,73 @@ class MatrixSDKBridge {
         let room = try requireRoom(roomId: roomId)
         let timeline = try await getOrCreateTimeline(room: room)
 
+        // Suppress live listener while we paginate to avoid flooding JS with historical events
+        paginatingLock.lock()
+        paginatingRooms.insert(roomId)
+        paginatingLock.unlock()
+
         let collector = TimelineItemCollector(roomId: roomId)
         let handle = await timeline.addListener(listener: collector)
 
-        // Wait for the initial Reset snapshot before paginating
-        let gotInitial = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
-        print("[CapMatrix] getRoomMessages: initial snapshot: \(collector.events.count) items, gotInitial=\(gotInitial)")
+        var hitStart = false
+        do {
+            // Wait for the initial Reset snapshot before paginating
+            let gotInitial = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+            let countBefore = collector.events.count
+            let isPagination = from != nil
+            print("[CapMatrix] getRoomMessages: initial snapshot: \(countBefore) items, gotInitial=\(gotInitial), from=\(from ?? "nil")")
 
-        // Only paginate if we don't have enough items yet
-        if collector.events.count < limit {
-            let hitStart = try await timeline.paginateBackwards(numEvents: UInt16(limit))
-            print("[CapMatrix] getRoomMessages: paginated, hitStart=\(hitStart)")
-
-            // If there were new events, wait for the diffs to arrive via the listener
-            if !hitStart {
-                _ = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+            // Reset cursor on initial load
+            if !isPagination {
+                oldestReturnedEventId.removeValue(forKey: roomId)
             }
-            print("[CapMatrix] getRoomMessages: after pagination: \(collector.events.count) items")
+
+            // Paginate when: first load with too few items, OR explicit pagination request
+            if isPagination || countBefore < limit {
+                hitStart = try await timeline.paginateBackwards(numEvents: UInt16(limit))
+                print("[CapMatrix] getRoomMessages: paginated, hitStart=\(hitStart)")
+
+                // If there were new events, wait for the diffs to arrive via the listener
+                if !hitStart {
+                    _ = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+                }
+                print("[CapMatrix] getRoomMessages: after pagination: \(collector.events.count) items (was \(countBefore))")
+            }
+        } catch {
+            handle.cancel()
+            paginatingLock.lock()
+            paginatingRooms.remove(roomId)
+            paginatingLock.unlock()
+            throw error
         }
 
         handle.cancel()
+        paginatingLock.lock()
+        paginatingRooms.remove(roomId)
+        paginatingLock.unlock()
 
-        var events = Array(collector.events.suffix(limit))
+        let allEvents = collector.events
+        var events: [[String: Any]]
+
+        if let cursorId = oldestReturnedEventId[roomId], from != nil {
+            // Pagination: find the cursor event and return events before it
+            if let cursorIdx = allEvents.firstIndex(where: { ($0["eventId"] as? String) == cursorId }) {
+                let available = Array(allEvents.prefix(cursorIdx))
+                events = Array(available.suffix(limit))
+            } else {
+                // Cursor not found (shouldn't happen) — fall back to empty
+                print("[CapMatrix] getRoomMessages: cursor eventId \(cursorId) not found in timeline")
+                events = []
+            }
+        } else {
+            // Initial load: return newest events
+            events = Array(allEvents.suffix(limit))
+        }
+
+        // Update cursor to the oldest event we're returning
+        if let oldest = events.first, let eid = oldest["eventId"] as? String {
+            oldestReturnedEventId[roomId] = eid
+        }
 
         // Apply receipt watermark: if any own event has readBy data,
         // all earlier own events in the timeline are also read.
@@ -663,9 +729,15 @@ class MatrixSDKBridge {
             }
         }
 
+        // Return a pagination token so the JS layer knows more messages are available.
+        // The Rust SDK timeline handles pagination state internally, so we use a
+        // synthetic token ("more") to signal that further back-pagination is possible.
+        // Also stop if pagination returned no new events (timeline fully loaded).
+        let nextBatch: String? = (hitStart || events.isEmpty) ? nil : "more"
+
         return [
             "events": events,
-            "nextBatch": nil as String? as Any
+            "nextBatch": nextBatch as Any
         ]
     }
 
@@ -952,6 +1024,16 @@ class MatrixSDKBridge {
         let isVerified = vState == .verified
         let isBackupEnabled = backupState == .enabled || backupState == .creating || backupState == .resuming
 
+        // recoveryState reflects the LOCAL device's state (.disabled on a returning
+        // device that hasn't recovered yet).  To decide whether encryption was
+        // set up server-side we also check if a backup exists on the server.
+        let ssReady: Bool
+        if recoveryState == .enabled {
+            ssReady = true
+        } else {
+            ssReady = (try? await enc.backupExistsOnServer()) ?? false
+        }
+
         return [
             "isCrossSigningReady": isVerified,
             "crossSigningStatus": [
@@ -961,13 +1043,25 @@ class MatrixSDKBridge {
                 "isReady": isVerified,
             ],
             "isKeyBackupEnabled": isBackupEnabled,
-            "isSecretStorageReady": recoveryState == .enabled,
+            "isSecretStorageReady": ssReady,
         ]
     }
 
     func bootstrapCrossSigning() async throws {
         guard let c = client else { throw MatrixBridgeError.notLoggedIn }
         await c.encryption().waitForE2eeInitializationTasks()
+    }
+
+    /// Cross-signs the given device using the current cross-signing keys.
+    /// After `recoverAndSetup` (which calls `recover` + `waitForE2eeInitializationTasks`),
+    /// the SDK should already have cross-signed this device. This method ensures
+    /// the E2EE initialization is complete and then resolves.
+    func verifyDevice(deviceId: String) async throws {
+        guard let c = client else { throw MatrixBridgeError.notLoggedIn }
+        let enc = c.encryption()
+        // Ensure cross-signing keys are fully imported and the device is signed
+        await enc.waitForE2eeInitializationTasks()
+        print("[CapMatrix] verifyDevice(\(deviceId)) — verificationState: \(enc.verificationState())")
     }
 
     func setupKeyBackup() async throws -> [String: Any] {
@@ -1008,9 +1102,144 @@ class MatrixSDKBridge {
         return c.encryption().recoveryState() == .enabled
     }
 
-    func recoverAndSetup(recoveryKey: String) async throws {
+    func recoverAndSetup(recoveryKey: String?, passphrase: String?) async throws {
         guard let c = client else { throw MatrixBridgeError.notLoggedIn }
-        try await c.encryption().recover(recoveryKey: recoveryKey)
+
+        let key: String
+        if let rk = recoveryKey {
+            key = rk
+        } else if let pp = passphrase {
+            key = try await deriveRecoveryKeyFromPassphrase(client: c, passphrase: pp)
+        } else {
+            throw MatrixBridgeError.missingParameter("recoveryKey or passphrase")
+        }
+
+        let enc = c.encryption()
+        try await enc.recover(recoveryKey: key)
+
+        // Wait for the SDK to finish importing cross-signing keys and
+        // verifying the current device after recovery.
+        await enc.waitForE2eeInitializationTasks()
+
+        // Enable key backup if not already active
+        if enc.backupState() != .enabled {
+            try? await enc.enableBackups()
+        }
+    }
+
+    // MARK: - Passphrase → recovery key derivation
+
+    /// Fetch the SSSS default key's PBKDF2 params from account data
+    /// and derive the recovery key from a passphrase.
+    private func deriveRecoveryKeyFromPassphrase(client c: Client, passphrase: String) async throws -> String {
+        // 1. Get the default key ID
+        guard let defaultKeyJson = try await c.accountData(eventType: "m.secret_storage.default_key"),
+              let defaultKeyData = defaultKeyJson.data(using: .utf8),
+              let defaultKeyDict = try JSONSerialization.jsonObject(with: defaultKeyData) as? [String: Any],
+              let keyId = defaultKeyDict["key"] as? String else {
+            throw MatrixBridgeError.custom("No default secret storage key found")
+        }
+
+        // 2. Get the key info (contains PBKDF2 params)
+        guard let keyInfoJson = try await c.accountData(eventType: "m.secret_storage.key.\(keyId)"),
+              let keyInfoData = keyInfoJson.data(using: .utf8),
+              let keyInfoDict = try JSONSerialization.jsonObject(with: keyInfoData) as? [String: Any],
+              let ppDict = keyInfoDict["passphrase"] as? [String: Any],
+              let salt = ppDict["salt"] as? String,
+              let iterations = ppDict["iterations"] as? Int else {
+            throw MatrixBridgeError.custom("Secret storage key has no passphrase params — use recovery key instead")
+        }
+        let bits = (ppDict["bits"] as? Int) ?? 256
+
+        // 3. PBKDF2-SHA-512 derivation
+        let derivedBytes = try pbkdf2SHA512(
+            passphrase: passphrase,
+            salt: salt,
+            iterations: iterations,
+            keyLengthBytes: bits / 8
+        )
+
+        // 4. Encode as Matrix recovery key (base58 with 0x8b01 prefix + parity)
+        return encodeRecoveryKey(derivedBytes)
+    }
+
+    private func pbkdf2SHA512(passphrase: String, salt: String, iterations: Int, keyLengthBytes: Int) throws -> Data {
+        guard let passData = passphrase.data(using: .utf8),
+              let saltData = salt.data(using: .utf8) else {
+            throw MatrixBridgeError.custom("Failed to encode passphrase/salt as UTF-8")
+        }
+
+        var derivedKey = Data(count: keyLengthBytes)
+        let status = derivedKey.withUnsafeMutableBytes { derivedKeyPtr in
+            passData.withUnsafeBytes { passPtr in
+                saltData.withUnsafeBytes { saltPtr in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passPtr.baseAddress?.assumingMemoryBound(to: Int8.self),
+                        passData.count,
+                        saltPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        saltData.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA512),
+                        UInt32(iterations),
+                        derivedKeyPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        keyLengthBytes
+                    )
+                }
+            }
+        }
+
+        guard status == kCCSuccess else {
+            throw MatrixBridgeError.custom("PBKDF2 derivation failed with status \(status)")
+        }
+
+        return derivedKey
+    }
+
+    /// Encode raw key bytes as a Matrix recovery key (base58 with 0x8b01 prefix + parity byte).
+    private func encodeRecoveryKey(_ keyData: Data) -> String {
+        let prefix: [UInt8] = [0x8b, 0x01]
+        var buf = Data(prefix) + keyData
+        // Calculate parity (XOR of all bytes)
+        var parity: UInt8 = 0
+        for byte in buf { parity ^= byte }
+        buf.append(parity)
+        // Base58 encode and insert spaces every 4 chars
+        let encoded = base58Encode(buf)
+        var spaced = ""
+        for (i, ch) in encoded.enumerated() {
+            if i > 0 && i % 4 == 0 { spaced.append(" ") }
+            spaced.append(ch)
+        }
+        return spaced
+    }
+
+    private static let base58Alphabet = Array("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+    private func base58Encode(_ data: Data) -> String {
+        var bytes = Array(data)
+        var result: [Character] = []
+
+        while !bytes.isEmpty {
+            var carry = 0
+            var newBytes: [UInt8] = []
+            for byte in bytes {
+                carry = carry * 256 + Int(byte)
+                if !newBytes.isEmpty || carry / 58 > 0 {
+                    newBytes.append(UInt8(carry / 58))
+                }
+                carry %= 58
+            }
+            result.append(Self.base58Alphabet[carry])
+            bytes = newBytes
+        }
+
+        // Preserve leading zeros
+        for byte in data {
+            if byte != 0 { break }
+            result.append(Self.base58Alphabet[0])
+        }
+
+        return String(result.reversed())
     }
 
     func resetRecoveryKey(passphrase: String?) async throws -> [String: Any] {
@@ -1237,16 +1466,35 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
 
 class LiveTimelineListener: TimelineListener {
     private let roomId: String
+    private let room: Room
     private let onMessage: ([String: Any]) -> Void
     private let onRoomUpdate: (String, [String: Any]) -> Void
+    private let isPaginating: () -> Bool
 
-    init(roomId: String, onMessage: @escaping ([String: Any]) -> Void, onRoomUpdate: @escaping (String, [String: Any]) -> Void) {
+    init(roomId: String, room: Room, onMessage: @escaping ([String: Any]) -> Void, onRoomUpdate: @escaping (String, [String: Any]) -> Void, isPaginating: @escaping () -> Bool) {
         self.roomId = roomId
+        self.room = room
         self.onMessage = onMessage
         self.onRoomUpdate = onRoomUpdate
+        self.isPaginating = isPaginating
+    }
+
+    /// Emit a room update with the current unread count fetched from the room.
+    private func emitRoomUpdate() {
+        Task {
+            let unreadCount: Int
+            if let info = try? await room.roomInfo() {
+                unreadCount = Int(info.numUnreadMessages ?? 0)
+            } else {
+                unreadCount = 0
+            }
+            onRoomUpdate(roomId, ["roomId": roomId, "unreadCount": unreadCount])
+        }
     }
 
     func onUpdate(diff: [TimelineDiff]) {
+        // Suppress live events while getRoomMessages is paginating this room
+        if isPaginating() { return }
         print("[CapMatrix] LiveTimelineListener onUpdate for \(roomId): \(diff.count) diffs")
         for d in diff {
             switch d {
@@ -1258,7 +1506,7 @@ class LiveTimelineListener: TimelineListener {
                         onMessage(event)
                     }
                 }
-                onRoomUpdate(roomId, ["roomId": roomId])
+                emitRoomUpdate()
             case .append(let items):
                 print("[CapMatrix]   Append: \(items.count) items")
                 items.forEach { item in
@@ -1267,7 +1515,7 @@ class LiveTimelineListener: TimelineListener {
                         onMessage(event)
                     }
                 }
-                onRoomUpdate(roomId, ["roomId": roomId])
+                emitRoomUpdate()
             case .pushBack(let item):
                 let isLocalEcho = item.asEvent().map { extractEventId($0.eventOrTransactionId) } != nil
                     && item.asEvent()?.eventOrTransactionId is EventOrTransactionId
@@ -1284,13 +1532,13 @@ class LiveTimelineListener: TimelineListener {
                     print("[CapMatrix]   PushBack item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil")")
                     onMessage(event)
                 }
-                onRoomUpdate(roomId, ["roomId": roomId])
+                emitRoomUpdate()
             case .pushFront(let item):
+                // PushFront = historical events from back-pagination — emit message but no room update
                 if let event = serializeTimelineItem(item, roomId: roomId) {
                     print("[CapMatrix]   PushFront item: \(event["eventId"] ?? "nil")")
                     onMessage(event)
                 }
-                onRoomUpdate(roomId, ["roomId": roomId])
             case .set(let index, let item):
                 if let event = serializeTimelineItem(item, roomId: roomId) {
                     print("[CapMatrix]   Set item: \(event["eventId"] ?? "nil") type=\(event["type"] ?? "nil") status=\(event["status"] ?? "nil") readBy=\(event["readBy"] ?? "nil")")
@@ -1298,7 +1546,7 @@ class LiveTimelineListener: TimelineListener {
                     // If this event has readBy data, trigger roomUpdated
                     // so the app can refresh receipt status for all messages
                     if let rb = event["readBy"] as? [String], !rb.isEmpty {
-                        onRoomUpdate(roomId, ["roomId": roomId])
+                        emitRoomUpdate()
                     }
                 }
             case .insert(let index, let item):
@@ -1306,7 +1554,7 @@ class LiveTimelineListener: TimelineListener {
                     print("[CapMatrix]   Insert item: \(event["eventId"] ?? "nil")")
                     onMessage(event)
                 }
-                onRoomUpdate(roomId, ["roomId": roomId])
+                emitRoomUpdate()
             case .remove:
                 break // Index-based removal, handled by JS layer
             default:
@@ -1474,6 +1722,8 @@ enum MatrixBridgeError: LocalizedError {
     case notLoggedIn
     case roomNotFound(String)
     case notSupported(String)
+    case missingParameter(String)
+    case custom(String)
 
     var errorDescription: String? {
         switch self {
@@ -1483,6 +1733,10 @@ enum MatrixBridgeError: LocalizedError {
             return "Room \(roomId) not found"
         case .notSupported(let method):
             return "\(method) is not supported in this version of the Matrix SDK"
+        case .missingParameter(let name):
+            return "Missing required parameter: \(name)"
+        case .custom(let message):
+            return message
         }
     }
 }

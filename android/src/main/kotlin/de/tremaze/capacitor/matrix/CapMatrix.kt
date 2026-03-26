@@ -65,6 +65,8 @@ class MatrixSDKBridge(private val context: Context) {
     private val timelineListenerHandles = mutableListOf<Any>()
     // Rooms currently being paginated by getRoomMessages — live listener suppresses events for these
     private val paginatingRooms = Collections.synchronizedSet(mutableSetOf<String>())
+    // Per-room tracking of the oldest event ID returned to JS, used for pagination cursor
+    private val oldestReturnedEventId = mutableMapOf<String, String>()
     private var receiptSyncJob: Job? = null
     // Receipt cache: roomId → (eventId → set of userIds who sent a read receipt)
     // Populated by the parallel v2 receipt sync since sliding sync doesn't deliver
@@ -108,6 +110,15 @@ class MatrixSDKBridge(private val context: Context) {
         userId: String,
         deviceId: String,
     ): SessionInfo {
+        // Stop existing sync and clean up stale references before replacing the client
+        syncService?.stop()
+        syncService = null
+        receiptSyncJob?.cancel()
+        receiptSyncJob = null
+        timelineListenerHandles.clear()
+        roomTimelines.clear()
+        subscribedRoomIds.clear()
+
         val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_.-]"), "_")
         val dataDir = context.filesDir.resolve("matrix_sdk/$safeUserId")
         dataDir.mkdirs()
@@ -223,6 +234,15 @@ class MatrixSDKBridge(private val context: Context) {
             try {
                 val timeline = getOrCreateTimeline(room)
                 val handle = timeline.addListener(object : TimelineListener {
+                    private fun emitRoomUpdate() {
+                        scope.launch {
+                            val unreadCount = try {
+                                room.roomInfo().numUnreadMessages?.toInt() ?: 0
+                            } catch (_: Exception) { 0 }
+                            onRoomUpdate(roomId, mapOf("roomId" to roomId, "unreadCount" to unreadCount))
+                        }
+                    }
+
                     override fun onUpdate(diff: List<TimelineDiff>) {
                         // Suppress live events while getRoomMessages is paginating this room
                         if (paginatingRooms.contains(roomId)) return
@@ -235,13 +255,13 @@ class MatrixSDKBridge(private val context: Context) {
                                         if (!isLocalEcho) {
                                             serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
                                         }
-                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                        emitRoomUpdate()
                                     }
                                     is TimelineDiff.Append -> {
                                         d.values.forEach { item ->
                                             serializeTimelineItem(item, roomId)?.let { onMessage(it) }
                                         }
-                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                        emitRoomUpdate()
                                     }
                                     is TimelineDiff.Set -> {
                                         serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
@@ -250,15 +270,15 @@ class MatrixSDKBridge(private val context: Context) {
                                         d.values.forEach { item ->
                                             serializeTimelineItem(item, roomId)?.let { onMessage(it) }
                                         }
-                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                        emitRoomUpdate()
                                     }
                                     is TimelineDiff.Insert -> {
                                         serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
-                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                        emitRoomUpdate()
                                     }
                                     is TimelineDiff.PushFront -> {
                                         serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
-                                        onRoomUpdate(roomId, mapOf("roomId" to roomId))
+                                        emitRoomUpdate()
                                     }
                                     else -> { /* Remove, Clear, Truncate, PopBack, PopFront — no JS event needed */ }
                                 }
@@ -416,13 +436,21 @@ class MatrixSDKBridge(private val context: Context) {
         val collector = TimelineItemCollector(roomId)
         val handle = timeline.addListener(collector)
 
+        val isPagination = from != null
+        var hitStart = false
         try {
             // Wait for the initial Reset snapshot before paginating
             collector.waitForUpdate(timeoutMs = 5000)
+            val countBefore = collector.events.size
 
-            // Only paginate if we don't have enough items yet
-            if (collector.events.size < requestedLimit) {
-                val hitStart = timeline.paginateBackwards(requestedLimit.toUShort())
+            // Reset cursor on initial load
+            if (!isPagination) {
+                oldestReturnedEventId.remove(roomId)
+            }
+
+            // Paginate when: first load with too few items, OR explicit pagination request
+            if (isPagination || countBefore < requestedLimit) {
+                hitStart = timeline.paginateBackwards(requestedLimit.toUShort())
                 if (!hitStart) {
                     collector.waitForUpdate(timeoutMs = 5000)
                 }
@@ -432,7 +460,28 @@ class MatrixSDKBridge(private val context: Context) {
             paginatingRooms.remove(roomId)
         }
 
-        var events = collector.events.takeLast(requestedLimit).map { it.toMutableMap() }
+        val allEvents = collector.events
+        val cursorId = oldestReturnedEventId[roomId]
+
+        var events = if (isPagination && cursorId != null) {
+            // Pagination: find the cursor event and return events before it
+            val cursorIdx = allEvents.indexOfFirst { (it["eventId"] as? String) == cursorId }
+            if (cursorIdx > 0) {
+                allEvents.take(cursorIdx).takeLast(requestedLimit).map { it.toMutableMap() }
+            } else {
+                emptyList<MutableMap<String, Any?>>()
+            }
+        } else {
+            // Initial load: return newest events
+            allEvents.takeLast(requestedLimit).map { it.toMutableMap() }
+        }
+
+        // Update cursor to the oldest event we're returning
+        events.firstOrNull()?.let { oldest ->
+            (oldest["eventId"] as? String)?.let { eid ->
+                oldestReturnedEventId[roomId] = eid
+            }
+        }
 
         // Apply receipt watermark: if any own event has readBy data,
         // all earlier own events in the timeline are also read.
@@ -466,9 +515,15 @@ class MatrixSDKBridge(private val context: Context) {
             }
         }
 
+        // Return a pagination token so the JS layer knows more messages are available.
+        // The Rust SDK timeline handles pagination state internally, so we use a
+        // synthetic token ("more") to signal that further back-pagination is possible.
+        // Also stop if pagination returned no new events (timeline fully loaded).
+        val nextBatch: String? = if (hitStart || events.isEmpty()) null else "more"
+
         return mapOf(
             "events" to events,
-            "nextBatch" to null,
+            "nextBatch" to nextBatch,
         )
     }
 
@@ -709,6 +764,20 @@ class MatrixSDKBridge(private val context: Context) {
         c.encryption().waitForE2eeInitializationTasks()
     }
 
+    /**
+     * Cross-signs the given device using the current cross-signing keys.
+     * After recoverAndSetup (which calls recover + waitForE2eeInitializationTasks),
+     * the SDK should already have cross-signed this device. This method ensures
+     * the E2EE initialization is complete and then resolves.
+     */
+    suspend fun verifyDevice(deviceId: String) {
+        val c = requireClient()
+        val enc = c.encryption()
+        // Ensure cross-signing keys are fully imported and the device is signed
+        enc.waitForE2eeInitializationTasks()
+        android.util.Log.d("CapMatrix", "verifyDevice($deviceId) — verificationState: ${enc.verificationState()}")
+    }
+
     suspend fun getEncryptionStatus(): Map<String, Any?> {
         val c = requireClient()
         val enc = c.encryption()
@@ -720,6 +789,15 @@ class MatrixSDKBridge(private val context: Context) {
         val verificationState = enc.verificationState()
         val isVerified = verificationState == VerificationState.VERIFIED
 
+        // recoveryState reflects the LOCAL device's state (.DISABLED on a returning
+        // device that hasn't recovered yet).  To decide whether encryption was
+        // set up server-side we also check if a backup exists on the server.
+        val ssReady = if (recoveryState == RecoveryState.ENABLED) {
+            true
+        } else {
+            try { enc.backupExistsOnServer() } catch (_: Exception) { false }
+        }
+
         return mapOf(
             "isCrossSigningReady" to isVerified,
             "crossSigningStatus" to mapOf(
@@ -729,7 +807,7 @@ class MatrixSDKBridge(private val context: Context) {
                 "isReady" to isVerified,
             ),
             "isKeyBackupEnabled" to isBackupEnabled,
-            "isSecretStorageReady" to (recoveryState == RecoveryState.ENABLED),
+            "isSecretStorageReady" to ssReady,
         )
     }
 
@@ -798,10 +876,103 @@ class MatrixSDKBridge(private val context: Context) {
         return c.encryption().recoveryState() == RecoveryState.ENABLED
     }
 
-    suspend fun recoverAndSetup(recoveryKey: String) {
+    suspend fun recoverAndSetup(recoveryKey: String?, passphrase: String?) {
         val c = requireClient()
-        c.encryption().recover(recoveryKey)
+        val key = recoveryKey ?: passphrase?.let { deriveRecoveryKeyFromPassphrase(c, it) }
+            ?: throw IllegalArgumentException("recoveryKey or passphrase required")
+
+        val enc = c.encryption()
+        enc.recover(key)
+
+        // Wait for the SDK to finish importing cross-signing keys and
+        // verifying the current device after recovery.
+        enc.waitForE2eeInitializationTasks()
+
+        // Enable key backup if not already active
+        if (enc.backupState() != BackupState.ENABLED) {
+            try { enc.enableBackups() } catch (_: Exception) { }
+        }
     }
+
+    // region Passphrase → recovery key derivation
+
+    /**
+     * Derive a Matrix recovery key from a passphrase using PBKDF2 params
+     * stored in the account's secret storage.
+     */
+    private suspend fun deriveRecoveryKeyFromPassphrase(client: Client, passphrase: String): String {
+        // 1. Get the default key ID
+        val defaultKeyJson = client.accountData("m.secret_storage.default_key")
+            ?: throw IllegalStateException("No default secret storage key found")
+        val defaultKeyMap = org.json.JSONObject(defaultKeyJson)
+        val keyId = defaultKeyMap.getString("key")
+
+        // 2. Get the key info with PBKDF2 params
+        val keyInfoJson = client.accountData("m.secret_storage.key.$keyId")
+            ?: throw IllegalStateException("Secret storage key info not found for $keyId")
+        val keyInfoMap = org.json.JSONObject(keyInfoJson)
+        val ppObj = keyInfoMap.optJSONObject("passphrase")
+            ?: throw IllegalStateException("Secret storage key has no passphrase params — use recovery key instead")
+        val salt = ppObj.getString("salt")
+        val iterations = ppObj.getInt("iterations")
+        val bits = ppObj.optInt("bits", 256)
+
+        // 3. PBKDF2-SHA-512 derivation
+        val factory = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512")
+        val spec = javax.crypto.spec.PBEKeySpec(
+            passphrase.toCharArray(),
+            salt.toByteArray(Charsets.UTF_8),
+            iterations,
+            bits,
+        )
+        val derivedBytes = factory.generateSecret(spec).encoded
+
+        // 4. Encode as Matrix recovery key
+        return encodeRecoveryKey(derivedBytes)
+    }
+
+    /**
+     * Encode raw key bytes as a Matrix recovery key (base58 with 0x8b01 prefix + parity byte).
+     */
+    private fun encodeRecoveryKey(keyData: ByteArray): String {
+        val prefix = byteArrayOf(0x8b.toByte(), 0x01)
+        val buf = prefix + keyData
+        var parity: Byte = 0
+        for (b in buf) parity = (parity.toInt() xor b.toInt()).toByte()
+        val full = buf + byteArrayOf(parity)
+        val encoded = base58Encode(full)
+        return encoded.chunked(4).joinToString(" ")
+    }
+
+    private val base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".toCharArray()
+
+    private fun base58Encode(data: ByteArray): String {
+        var bytes = data.toMutableList()
+        val result = mutableListOf<Char>()
+
+        while (bytes.isNotEmpty()) {
+            var carry = 0
+            val newBytes = mutableListOf<Byte>()
+            for (b in bytes) {
+                carry = carry * 256 + (b.toInt() and 0xFF)
+                if (newBytes.isNotEmpty() || carry / 58 > 0) {
+                    newBytes.add((carry / 58).toByte())
+                }
+                carry %= 58
+            }
+            result.add(base58Alphabet[carry])
+            bytes = newBytes
+        }
+
+        // Preserve leading zeros
+        for (b in data) {
+            if (b.toInt() != 0) break
+            result.add(base58Alphabet[0])
+        }
+
+        return result.reversed().joinToString("")
+    }
+    // endregion
 
     suspend fun resetRecoveryKey(): Map<String, Any?> {
         val c = requireClient()

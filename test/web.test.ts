@@ -376,6 +376,9 @@ describe('getRooms', () => {
       isEncrypted: true,
       unreadCount: 3,
       lastEventTs: 1700000000000,
+      membership: 'join',
+      avatarUrl: undefined,
+      isDirect: false,
     });
   });
 });
@@ -587,7 +590,7 @@ describe('bootstrapCrossSigning', () => {
     await plugin.bootstrapCrossSigning();
 
     expect(crypto.bootstrapCrossSigning).toHaveBeenCalledWith(
-      expect.objectContaining({ setupNewCrossSigning: true }),
+      expect.objectContaining({ authUploadDeviceSigningKeys: expect.any(Function) }),
     );
   });
 
@@ -838,18 +841,17 @@ describe('getMediaUrl', () => {
   beforeEach(loginPlugin);
 
   it('converts mxc URL to http', async () => {
-    mockClient.mxcUrlToHttp.mockReturnValue('https://matrix.test/_matrix/media/v3/download/l/abc');
-
     const result = await plugin.getMediaUrl({ mxcUrl: 'mxc://l/abc' });
-    expect(mockClient.mxcUrlToHttp).toHaveBeenCalledWith('mxc://l/abc');
-    expect(result.httpUrl).toBe('https://matrix.test/_matrix/media/v3/download/l/abc');
+    expect(result.httpUrl).toBe(
+      'https://localhost/_matrix/client/v1/media/download/l/abc?access_token=mock-token',
+    );
   });
 
-  it('returns empty string when mxcUrlToHttp returns null', async () => {
-    mockClient.mxcUrlToHttp.mockReturnValue(null);
-
+  it('returns authenticated media URL for any mxc input', async () => {
     const result = await plugin.getMediaUrl({ mxcUrl: 'mxc://invalid' });
-    expect(result.httpUrl).toBe('');
+    expect(result.httpUrl).toBe(
+      'https://localhost/_matrix/client/v1/media/download/invalid?access_token=mock-token',
+    );
   });
 });
 

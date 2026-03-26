@@ -132,6 +132,8 @@ export interface MatrixEvent {
   roomId: string;
   senderId: string;
   type: string;
+  /** State key for state events (e.g. target user ID for m.room.member) */
+  stateKey?: string;
   content: Record<string, unknown>;
   originServerTs: number;
   /** Delivery/read status for own messages: 'sending' | 'sent' | 'delivered' | 'read' */

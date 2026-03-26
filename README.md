@@ -1280,6 +1280,7 @@ removeAllListeners() => Promise<void>
 | **`roomId`**         | <code>string</code>                                              |                                                                                     |
 | **`senderId`**       | <code>string</code>                                              |                                                                                     |
 | **`type`**           | <code>string</code>                                              |                                                                                     |
+| **`stateKey`**       | <code>string</code>                                              | State key for state events (e.g. target user ID for m.room.member)                  |
 | **`content`**        | <code><a href="#record">Record</a>&lt;string, unknown&gt;</code> |                                                                                     |
 | **`originServerTs`** | <code>number</code>                                              |                                                                                     |
 | **`status`**         | <code>'sending' \| 'sent' \| 'delivered' \| 'read'</code>        | Delivery/read status for own messages: 'sending' \| 'sent' \| 'delivered' \| 'read' |
