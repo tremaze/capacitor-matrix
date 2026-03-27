@@ -48,6 +48,9 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   private recoveryPassphrase?: string;
   private fallbackPassphrase?: string;   // old passphrase for SSSS migration in setupRecovery
 
+  private _tokenRefreshResolve?: (tokens: { accessToken: string; refreshToken?: string }) => void;
+  private _tokenRefreshTimeout?: ReturnType<typeof setTimeout>;
+
   private readonly _cryptoCallbacks = {
     getSecretStorageKey: async (
       opts: { keys: Record<string, unknown> },
@@ -122,6 +125,8 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       userId: res.user_id,
       deviceId: res.device_id,
       cryptoCallbacks: this._cryptoCallbacks,
+      refreshToken: 'jwt-placeholder',
+      tokenRefreshFunction: this.createTokenRefreshFunction(),
     });
 
     const session: SessionInfo = {
@@ -149,6 +154,8 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       userId: options.userId,
       deviceId: options.deviceId,
       cryptoCallbacks: this._cryptoCallbacks,
+      refreshToken: 'jwt-placeholder',
+      tokenRefreshFunction: this.createTokenRefreshFunction(),
     });
 
     const session: SessionInfo = {
@@ -199,6 +206,30 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       return JSON.parse(raw) as SessionInfo;
     } catch {
       return null;
+    }
+  }
+
+  async updateAccessToken(options: { accessToken: string }): Promise<void> {
+    this.requireClient();
+    this.client!.setAccessToken(options.accessToken);
+
+    // Update persisted session
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) {
+      const session = JSON.parse(raw) as SessionInfo;
+      session.accessToken = options.accessToken;
+      this.persistSession(session);
+    }
+
+    // Resolve pending tokenRefreshFunction promise (if SDK is waiting)
+    if (this._tokenRefreshResolve) {
+      const resolve = this._tokenRefreshResolve;
+      this._tokenRefreshResolve = undefined;
+      if (this._tokenRefreshTimeout) {
+        clearTimeout(this._tokenRefreshTimeout);
+        this._tokenRefreshTimeout = undefined;
+      }
+      resolve({ accessToken: options.accessToken, refreshToken: 'jwt-placeholder' });
     }
   }
 
@@ -1145,6 +1176,20 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   private persistSession(session: SessionInfo): void {
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  }
+
+  private createTokenRefreshFunction(): (_refreshToken: string) => Promise<{ accessToken: string; refreshToken?: string }> {
+    return (_refreshToken: string) => {
+      this.notifyListeners('tokenRefreshRequired', {});
+      return new Promise((resolve, reject) => {
+        if (this._tokenRefreshTimeout) clearTimeout(this._tokenRefreshTimeout);
+        this._tokenRefreshResolve = resolve;
+        this._tokenRefreshTimeout = setTimeout(() => {
+          this._tokenRefreshResolve = undefined;
+          reject(new Error('Token refresh timed out'));
+        }, 30_000);
+      });
+    };
   }
 
   private serializeEvent(event: SdkMatrixEvent, fallbackRoomId?: string): MatrixEvent {

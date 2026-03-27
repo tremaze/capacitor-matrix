@@ -186,6 +186,40 @@ class MatrixSDKBridge(private val context: Context) {
         return sessionStore.load()
     }
 
+    suspend fun updateAccessToken(accessToken: String) {
+        val c = requireClient()
+
+        // Stop sync service but keep the client (preserves crypto state)
+        syncService?.stop()
+        syncService = null
+        receiptSyncJob?.cancel()
+        receiptSyncJob = null
+        receiptCache.clear()
+        timelineListenerHandles.clear()
+        roomTimelines.clear()
+        subscribedRoomIds.clear()
+
+        // Restore session on the existing client with the new token
+        val oldSession = sessionStore.load()
+            ?: throw IllegalStateException("No persisted session to update")
+
+        val newSession = Session(
+            accessToken = accessToken,
+            refreshToken = null,
+            userId = oldSession.userId,
+            deviceId = oldSession.deviceId,
+            homeserverUrl = oldSession.homeserverUrl,
+            oidcData = null,
+            slidingSyncVersion = SlidingSyncVersion.NATIVE,
+        )
+
+        c.restoreSession(newSession)
+
+        // Update persisted session
+        val updatedInfo = oldSession.copy(accessToken = accessToken)
+        sessionStore.save(updatedInfo)
+    }
+
     // ── Sync ──────────────────────────────────────────────
 
     suspend fun startSync(

@@ -404,5 +404,13 @@ export interface MatrixPlugin {
     event: 'presenceChanged',
     listenerFunc: (data: PresenceChangedEvent) => void,
   ): Promise<PluginListenerHandle>;
+  // Token Refresh
+  updateAccessToken(options: { accessToken: string }): Promise<void>;
+
+  addListener(
+    event: 'tokenRefreshRequired',
+    listenerFunc: () => void,
+  ): Promise<PluginListenerHandle>;
+
   removeAllListeners(): Promise<void>;
 }

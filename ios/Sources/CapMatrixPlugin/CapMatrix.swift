@@ -174,6 +174,48 @@ class MatrixSDKBridge {
         return sessionStore.load()?.toDictionary()
     }
 
+    func updateAccessToken(accessToken: String) async throws {
+        guard let c = client else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+
+        // Stop sync service but keep the client (preserves crypto state)
+        await syncService?.stop()
+        syncService = nil
+        syncStateHandle = nil
+        receiptSyncTask?.cancel()
+        receiptSyncTask = nil
+        timelineListenerHandles.removeAll()
+        roomTimelines.removeAll()
+        subscribedRoomIds.removeAll()
+
+        // Restore session on the existing client with the new token
+        guard let oldSession = sessionStore.load() else {
+            throw MatrixBridgeError.custom("No persisted session to update")
+        }
+
+        let newSession = Session(
+            accessToken: accessToken,
+            refreshToken: nil,
+            userId: oldSession.userId,
+            deviceId: oldSession.deviceId,
+            homeserverUrl: oldSession.homeserverUrl,
+            oidcData: nil,
+            slidingSyncVersion: .native
+        )
+
+        try await c.restoreSession(session: newSession)
+
+        // Update persisted session
+        let updatedInfo = MatrixSessionInfo(
+            accessToken: accessToken,
+            userId: oldSession.userId,
+            deviceId: oldSession.deviceId,
+            homeserverUrl: oldSession.homeserverUrl
+        )
+        sessionStore.save(session: updatedInfo)
+    }
+
     // MARK: - Sync
 
     func startSync(

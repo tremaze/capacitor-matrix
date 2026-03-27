@@ -58,6 +58,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setPusher", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "verifyDevice", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clearAllData", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "updateAccessToken", returnType: CAPPluginReturnPromise),
     ]
 
     private let matrixBridge = MatrixSDKBridge()
@@ -116,6 +117,21 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func clearAllData(_ call: CAPPluginCall) {
         matrixBridge.clearAllData()
         call.resolve()
+    }
+
+    @objc func updateAccessToken(_ call: CAPPluginCall) {
+        guard let accessToken = call.getString("accessToken") else {
+            return call.reject("Missing accessToken")
+        }
+
+        Task {
+            do {
+                try await matrixBridge.updateAccessToken(accessToken: accessToken)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
     }
 
     @objc func getSession(_ call: CAPPluginCall) {

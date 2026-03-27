@@ -370,6 +370,8 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`addListener('typingChanged', ...)`](#addlistenertypingchanged-)
 * [`addListener('receiptReceived', ...)`](#addlistenerreceiptreceived-)
 * [`addListener('presenceChanged', ...)`](#addlistenerpresencechanged-)
+* [`updateAccessToken(...)`](#updateaccesstoken)
+* [`addListener('tokenRefreshRequired', ...)`](#addlistenertokenrefreshrequired-)
 * [`removeAllListeners()`](#removealllisteners)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
@@ -1149,6 +1151,35 @@ addListener(event: 'presenceChanged', listenerFunc: (data: PresenceChangedEvent)
 | ------------------ | ---------------------------------------------------------------------------------------- |
 | **`event`**        | <code>'presenceChanged'</code>                                                           |
 | **`listenerFunc`** | <code>(data: <a href="#presencechangedevent">PresenceChangedEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
+### updateAccessToken(...)
+
+```typescript
+updateAccessToken(options: { accessToken: string; }) => Promise<void>
+```
+
+| Param         | Type                                  |
+| ------------- | ------------------------------------- |
+| **`options`** | <code>{ accessToken: string; }</code> |
+
+--------------------
+
+
+### addListener('tokenRefreshRequired', ...)
+
+```typescript
+addListener(event: 'tokenRefreshRequired', listenerFunc: () => void) => Promise<PluginListenerHandle>
+```
+
+| Param              | Type                                |
+| ------------------ | ----------------------------------- |
+| **`event`**        | <code>'tokenRefreshRequired'</code> |
+| **`listenerFunc`** | <code>() =&gt; void</code>          |
 
 **Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
 

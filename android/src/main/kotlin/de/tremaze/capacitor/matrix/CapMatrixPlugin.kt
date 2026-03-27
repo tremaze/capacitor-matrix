@@ -55,6 +55,20 @@ class MatrixPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun updateAccessToken(call: PluginCall) {
+        val accessToken = call.getString("accessToken") ?: return call.reject("Missing accessToken")
+
+        scope.launch {
+            try {
+                bridge.updateAccessToken(accessToken)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "updateAccessToken failed", e)
+            }
+        }
+    }
+
+    @PluginMethod
     fun logout(call: PluginCall) {
         scope.launch {
             try {
