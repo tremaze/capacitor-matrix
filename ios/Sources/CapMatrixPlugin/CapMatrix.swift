@@ -1337,6 +1337,123 @@ class MatrixSDKBridge {
         throw MatrixBridgeError.notSupported("importRoomKeys")
     }
 
+    // MARK: - Presence
+
+    func setPresence(presence: String, statusMsg: String?) async throws {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let encodedUserId = session.userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? session.userId
+        let urlString = "\(baseUrl)/_matrix/client/v3/presence/\(encodedUserId)/status"
+        guard let url = URL(string: urlString) else {
+            throw MatrixBridgeError.notSupported("Invalid presence URL")
+        }
+
+        var body: [String: Any] = ["presence": presence]
+        if let msg = statusMsg { body["status_msg"] = msg }
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = bodyData
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard statusCode >= 200 && statusCode < 300 else {
+            throw MatrixBridgeError.notSupported("setPresence failed with status \(statusCode)")
+        }
+    }
+
+    func getPresence(userId: String) async throws -> [String: Any] {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let encodedUserId = userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userId
+        let urlString = "\(baseUrl)/_matrix/client/v3/presence/\(encodedUserId)/status"
+        guard let url = URL(string: urlString) else {
+            throw MatrixBridgeError.notSupported("Invalid presence URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard statusCode >= 200 && statusCode < 300 else {
+            throw MatrixBridgeError.notSupported("getPresence failed with status \(statusCode)")
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MatrixBridgeError.notSupported("Invalid presence response")
+        }
+
+        var result: [String: Any] = ["presence": json["presence"] as? String ?? "offline"]
+        if let msg = json["status_msg"] as? String { result["statusMsg"] = msg }
+        if let ago = json["last_active_ago"] as? Int { result["lastActiveAgo"] = ago }
+        return result
+    }
+
+    // MARK: - Pushers
+
+    func setPusher(
+        pushkey: String,
+        kind: String?,
+        appId: String,
+        appDisplayName: String,
+        deviceDisplayName: String,
+        lang: String,
+        dataUrl: String,
+        dataFormat: String?
+    ) async throws {
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let urlString = "\(baseUrl)/_matrix/client/v3/pushers/set"
+        guard let url = URL(string: urlString) else {
+            throw MatrixBridgeError.notSupported("Invalid pushers URL")
+        }
+
+        var dataObj: [String: Any] = ["url": dataUrl]
+        if let format = dataFormat { dataObj["format"] = format }
+
+        var body: [String: Any] = [
+            "pushkey": pushkey,
+            "kind": kind as Any,
+            "app_id": appId,
+            "app_display_name": appDisplayName,
+            "device_display_name": deviceDisplayName,
+            "lang": lang,
+            "data": dataObj,
+        ]
+        if kind == nil { body["kind"] = NSNull() }
+
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = bodyData
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard statusCode >= 200 && statusCode < 300 else {
+            throw MatrixBridgeError.notSupported("setPusher failed with status \(statusCode)")
+        }
+    }
+
     // MARK: - Helpers
 
     private static func dataDirectory() -> String {

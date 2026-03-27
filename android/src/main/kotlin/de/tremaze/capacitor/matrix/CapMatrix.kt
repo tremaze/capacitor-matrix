@@ -187,9 +187,9 @@ class MatrixSDKBridge(private val context: Context) {
     }
 
     suspend fun updateAccessToken(accessToken: String) {
-        val c = requireClient()
+        requireClient()
 
-        // Stop sync service but keep the client (preserves crypto state)
+        // Stop sync service and clean up references
         syncService?.stop()
         syncService = null
         receiptSyncJob?.cancel()
@@ -199,9 +199,22 @@ class MatrixSDKBridge(private val context: Context) {
         roomTimelines.clear()
         subscribedRoomIds.clear()
 
-        // Restore session on the existing client with the new token
         val oldSession = sessionStore.load()
             ?: throw IllegalStateException("No persisted session to update")
+
+        // Build a new client pointing to the same data directory (preserves crypto store).
+        // The Rust SDK's restoreSession() can only be called once per Client instance.
+        val safeUserId = oldSession.userId.replace(Regex("[^a-zA-Z0-9_.-]"), "_")
+        val dataDir = context.filesDir.resolve("matrix_sdk/$safeUserId")
+        dataDir.mkdirs()
+        val dataDirPath = dataDir.absolutePath
+
+        val newClient = ClientBuilder()
+            .homeserverUrl(oldSession.homeserverUrl)
+            .slidingSyncVersionBuilder(SlidingSyncVersionBuilder.NATIVE)
+            .autoEnableCrossSigning(true)
+            .sqliteStore(SqliteStoreBuilder(dataDirPath, dataDirPath))
+            .build()
 
         val newSession = Session(
             accessToken = accessToken,
@@ -213,9 +226,9 @@ class MatrixSDKBridge(private val context: Context) {
             slidingSyncVersion = SlidingSyncVersion.NATIVE,
         )
 
-        c.restoreSession(newSession)
+        newClient.restoreSession(newSession)
+        client = newClient
 
-        // Update persisted session
         val updatedInfo = oldSession.copy(accessToken = accessToken)
         sessionStore.save(updatedInfo)
     }
@@ -1029,6 +1042,101 @@ class MatrixSDKBridge(private val context: Context) {
             },
             "limited" to result.limited,
         )
+    }
+
+    // ── Presence ─────────────────────────────────────────
+
+    suspend fun setPresence(presence: String, statusMsg: String?) {
+        val session = sessionStore.load() ?: throw IllegalStateException("Not logged in")
+        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val encodedUserId = URLEncoder.encode(session.userId, "UTF-8")
+        val url = URL("$baseUrl/_matrix/client/v3/presence/$encodedUserId/status")
+        val connection = url.openConnection() as HttpURLConnection
+        connection.requestMethod = "PUT"
+        connection.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.doOutput = true
+
+        val body = org.json.JSONObject()
+        body.put("presence", presence)
+        if (statusMsg != null) body.put("status_msg", statusMsg)
+        val writer = OutputStreamWriter(connection.outputStream)
+        writer.write(body.toString())
+        writer.flush()
+        writer.close()
+
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            throw Exception("setPresence failed with status $responseCode")
+        }
+    }
+
+    suspend fun getPresence(userId: String): Map<String, Any?> {
+        val session = sessionStore.load() ?: throw IllegalStateException("Not logged in")
+        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val encodedUserId = URLEncoder.encode(userId, "UTF-8")
+        val url = URL("$baseUrl/_matrix/client/v3/presence/$encodedUserId/status")
+        val connection = url.openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            throw Exception("getPresence failed with status $responseCode")
+        }
+
+        val responseBody = connection.inputStream.bufferedReader().readText()
+        val json = org.json.JSONObject(responseBody)
+        return mapOf(
+            "presence" to json.optString("presence", "offline"),
+            "statusMsg" to if (json.has("status_msg")) json.getString("status_msg") else null,
+            "lastActiveAgo" to if (json.has("last_active_ago")) json.getLong("last_active_ago") else null,
+        )
+    }
+
+    // ── Pushers ───────────────────────────────────────────
+
+    suspend fun setPusher(
+        pushkey: String,
+        kind: String?,
+        appId: String,
+        appDisplayName: String,
+        deviceDisplayName: String,
+        lang: String,
+        dataUrl: String,
+        dataFormat: String?,
+    ) {
+        val session = sessionStore.load() ?: throw IllegalStateException("Not logged in")
+        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val url = URL("$baseUrl/_matrix/client/v3/pushers/set")
+        val connection = url.openConnection() as HttpURLConnection
+        connection.requestMethod = "POST"
+        connection.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.doOutput = true
+
+        val dataObj = org.json.JSONObject()
+        dataObj.put("url", dataUrl)
+        if (dataFormat != null) dataObj.put("format", dataFormat)
+
+        val body = org.json.JSONObject()
+        body.put("pushkey", pushkey)
+        body.put("kind", if (kind != null) kind else org.json.JSONObject.NULL)
+        body.put("app_id", appId)
+        body.put("app_display_name", appDisplayName)
+        body.put("device_display_name", deviceDisplayName)
+        body.put("lang", lang)
+        body.put("data", dataObj)
+
+        val writer = OutputStreamWriter(connection.outputStream)
+        writer.write(body.toString())
+        writer.flush()
+        writer.close()
+
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            throw Exception("setPusher failed with status $responseCode")
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────

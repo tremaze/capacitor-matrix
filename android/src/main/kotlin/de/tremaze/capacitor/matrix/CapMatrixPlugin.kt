@@ -544,7 +544,24 @@ class MatrixPlugin : Plugin() {
 
     @PluginMethod
     fun setPusher(call: PluginCall) {
-        call.reject("setPusher is not yet supported on this platform")
+        val pushkey = call.getString("pushkey") ?: return call.reject("Missing pushkey")
+        val kind = call.getString("kind")
+        val appId = call.getString("appId") ?: return call.reject("Missing appId")
+        val appDisplayName = call.getString("appDisplayName") ?: return call.reject("Missing appDisplayName")
+        val deviceDisplayName = call.getString("deviceDisplayName") ?: return call.reject("Missing deviceDisplayName")
+        val lang = call.getString("lang") ?: return call.reject("Missing lang")
+        val dataObj = call.getObject("data") ?: return call.reject("Missing data")
+        val dataUrl = dataObj.getString("url") ?: return call.reject("Missing data.url")
+        val dataFormat = dataObj.optString("format", null)
+
+        scope.launch {
+            try {
+                bridge.setPusher(pushkey, kind, appId, appDisplayName, deviceDisplayName, lang, dataUrl, dataFormat)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "setPusher failed", e)
+            }
+        }
     }
 
     @PluginMethod
@@ -639,12 +656,31 @@ class MatrixPlugin : Plugin() {
 
     @PluginMethod
     fun setPresence(call: PluginCall) {
-        call.reject("setPresence is not supported on this platform")
+        val presence = call.getString("presence") ?: return call.reject("Missing presence")
+        val statusMsg = call.getString("statusMsg")
+
+        scope.launch {
+            try {
+                bridge.setPresence(presence, statusMsg)
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject(e.message ?: "setPresence failed", e)
+            }
+        }
     }
 
     @PluginMethod
     fun getPresence(call: PluginCall) {
-        call.reject("getPresence is not supported on this platform")
+        val userId = call.getString("userId") ?: return call.reject("Missing userId")
+
+        scope.launch {
+            try {
+                val result = bridge.getPresence(userId)
+                call.resolve(mapToJSObject(result))
+            } catch (e: Exception) {
+                call.reject(e.message ?: "getPresence failed", e)
+            }
+        }
     }
 
     @PluginMethod

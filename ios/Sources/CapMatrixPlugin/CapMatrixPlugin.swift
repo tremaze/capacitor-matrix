@@ -677,11 +677,34 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func setPresence(_ call: CAPPluginCall) {
-        call.reject("setPresence is not supported on this platform")
+        guard let presence = call.getString("presence") else {
+            return call.reject("Missing presence")
+        }
+        let statusMsg = call.getString("statusMsg")
+
+        Task {
+            do {
+                try await matrixBridge.setPresence(presence: presence, statusMsg: statusMsg)
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
     }
 
     @objc func getPresence(_ call: CAPPluginCall) {
-        call.reject("getPresence is not supported on this platform")
+        guard let userId = call.getString("userId") else {
+            return call.reject("Missing userId")
+        }
+
+        Task {
+            do {
+                let result = try await matrixBridge.getPresence(userId: userId)
+                call.resolve(result)
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
     }
 
     @objc func forgetRoom(_ call: CAPPluginCall) {
@@ -827,6 +850,34 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func setPusher(_ call: CAPPluginCall) {
-        call.reject("setPusher is not yet supported")
+        guard let pushkey = call.getString("pushkey"),
+              let appId = call.getString("appId"),
+              let appDisplayName = call.getString("appDisplayName"),
+              let deviceDisplayName = call.getString("deviceDisplayName"),
+              let lang = call.getString("lang"),
+              let dataObj = call.getObject("data"),
+              let dataUrl = dataObj["url"] as? String else {
+            return call.reject("Missing required parameters")
+        }
+        let kind = call.getString("kind")
+        let dataFormat = dataObj["format"] as? String
+
+        Task {
+            do {
+                try await matrixBridge.setPusher(
+                    pushkey: pushkey,
+                    kind: kind,
+                    appId: appId,
+                    appDisplayName: appDisplayName,
+                    deviceDisplayName: deviceDisplayName,
+                    lang: lang,
+                    dataUrl: dataUrl,
+                    dataFormat: dataFormat
+                )
+                call.resolve()
+            } catch {
+                call.reject(error.localizedDescription)
+            }
+        }
     }
 }
