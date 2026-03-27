@@ -1229,18 +1229,31 @@ removeAllListeners() => Promise<void>
 
 #### RoomSummary
 
-| Prop              | Type                                                |
-| ----------------- | --------------------------------------------------- |
-| **`roomId`**      | <code>string</code>                                 |
-| **`name`**        | <code>string</code>                                 |
-| **`topic`**       | <code>string</code>                                 |
-| **`memberCount`** | <code>number</code>                                 |
-| **`isEncrypted`** | <code>boolean</code>                                |
-| **`unreadCount`** | <code>number</code>                                 |
-| **`lastEventTs`** | <code>number</code>                                 |
-| **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code> |
-| **`avatarUrl`**   | <code>string</code>                                 |
-| **`isDirect`**    | <code>boolean</code>                                |
+| Prop              | Type                                                              |
+| ----------------- | ----------------------------------------------------------------- |
+| **`roomId`**      | <code>string</code>                                               |
+| **`name`**        | <code>string</code>                                               |
+| **`topic`**       | <code>string</code>                                               |
+| **`memberCount`** | <code>number</code>                                               |
+| **`isEncrypted`** | <code>boolean</code>                                              |
+| **`unreadCount`** | <code>number</code>                                               |
+| **`lastEventTs`** | <code>number</code>                                               |
+| **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code>               |
+| **`avatarUrl`**   | <code>string</code>                                               |
+| **`isDirect`**    | <code>boolean</code>                                              |
+| **`latestEvent`** | <code><a href="#latesteventpreview">LatestEventPreview</a></code> |
+
+
+#### LatestEventPreview
+
+| Prop                    | Type                                                             |
+| ----------------------- | ---------------------------------------------------------------- |
+| **`roomId`**            | <code>string</code>                                              |
+| **`senderId`**          | <code>string</code>                                              |
+| **`type`**              | <code>string</code>                                              |
+| **`content`**           | <code><a href="#record">Record</a>&lt;string, unknown&gt;</code> |
+| **`originServerTs`**    | <code>number</code>                                              |
+| **`senderDisplayName`** | <code>string</code>                                              |
 
 
 #### RoomMember
