@@ -16,6 +16,8 @@ import org.matrix.rustcomponents.sdk.EnableRecoveryProgressListener
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.EventSendState
 import org.matrix.rustcomponents.sdk.EventTimelineItem
+import org.matrix.rustcomponents.sdk.LatestEventValue
+import org.matrix.rustcomponents.sdk.ProfileDetails
 import org.matrix.rustcomponents.sdk.MembershipState
 import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeKind
@@ -286,7 +288,17 @@ class MatrixSDKBridge(private val context: Context) {
                             val unreadCount = try {
                                 room.roomInfo().numUnreadMessages?.toInt() ?: 0
                             } catch (_: Exception) { 0 }
-                            onRoomUpdate(roomId, mapOf("roomId" to roomId, "unreadCount" to unreadCount))
+                            val summary = mutableMapOf<String, Any?>(
+                                "roomId" to roomId,
+                                "unreadCount" to unreadCount,
+                            )
+                            try {
+                                val le = serializeLatestEvent(room.latestEvent(), roomId)
+                                if (le != null) {
+                                    summary["latestEvent"] = le
+                                }
+                            } catch (_: Exception) {}
+                            onRoomUpdate(roomId, summary)
                         }
                     }
 
@@ -1167,18 +1179,99 @@ class MatrixSDKBridge(private val context: Context) {
         val avatarUrl = info.rawName?.let { null } // Rust SDK doesn't expose avatar URL via RoomInfo
         // TODO: Expose room avatar from Rust SDK when available
 
-        return mapOf(
+        val latestEvent = serializeLatestEvent(room.latestEvent(), room.id())
+
+        val result = mutableMapOf<String, Any?>(
             "roomId" to room.id(),
             "name" to (info.displayName ?: ""),
             "topic" to info.topic,
             "memberCount" to info.joinedMembersCount.toInt(),
             "isEncrypted" to (info.encryptionState != EncryptionState.NOT_ENCRYPTED),
             "unreadCount" to (info.numUnreadMessages?.toInt() ?: 0),
-            "lastEventTs" to null,
+            "lastEventTs" to latestEvent?.get("originServerTs"),
             "membership" to membership,
             "avatarUrl" to avatarUrl,
             "isDirect" to isDirect,
         )
+        if (latestEvent != null) {
+            result["latestEvent"] = latestEvent
+        }
+        return result
+    }
+
+    private fun serializeLatestEvent(value: LatestEventValue, roomId: String): Map<String, Any?>? {
+        val timestamp: Long
+        val sender: String
+        val profile: ProfileDetails
+        val content: TimelineItemContent
+
+        when (value) {
+            is LatestEventValue.None -> return null
+            is LatestEventValue.Remote -> {
+                timestamp = value.timestamp.toLong()
+                sender = value.sender
+                profile = value.profile
+                content = value.content
+            }
+            is LatestEventValue.Local -> {
+                timestamp = value.timestamp.toLong()
+                sender = value.sender
+                profile = value.profile
+                content = value.content
+            }
+            else -> return null
+        }
+
+        val contentMap = mutableMapOf<String, Any?>()
+        var eventType = "m.room.message"
+
+        when (content) {
+            is TimelineItemContent.MsgLike -> {
+                when (val kind = content.content.kind) {
+                    is MsgLikeKind.Message -> {
+                        contentMap["body"] = kind.content.body
+                        when (kind.content.msgType) {
+                            is MessageType.Text -> contentMap["msgtype"] = "m.text"
+                            is MessageType.Image -> contentMap["msgtype"] = "m.image"
+                            is MessageType.File -> contentMap["msgtype"] = "m.file"
+                            is MessageType.Audio -> contentMap["msgtype"] = "m.audio"
+                            is MessageType.Video -> contentMap["msgtype"] = "m.video"
+                            is MessageType.Emote -> contentMap["msgtype"] = "m.emote"
+                            is MessageType.Notice -> contentMap["msgtype"] = "m.notice"
+                            else -> contentMap["msgtype"] = "m.text"
+                        }
+                    }
+                    is MsgLikeKind.UnableToDecrypt -> {
+                        contentMap["body"] = "Unable to decrypt message"
+                        contentMap["msgtype"] = "m.text"
+                        contentMap["encrypted"] = true
+                    }
+                    is MsgLikeKind.Redacted -> {
+                        eventType = "m.room.redaction"
+                        contentMap["body"] = "Message deleted"
+                    }
+                    else -> eventType = "m.room.unknown"
+                }
+            }
+            else -> eventType = "m.room.unknown"
+        }
+
+        var senderDisplayName: String? = null
+        if (profile is ProfileDetails.Ready) {
+            senderDisplayName = profile.displayName
+        }
+
+        val result = mutableMapOf<String, Any?>(
+            "roomId" to roomId,
+            "senderId" to sender,
+            "type" to eventType,
+            "content" to contentMap,
+            "originServerTs" to timestamp,
+        )
+        if (senderDisplayName != null) {
+            result["senderDisplayName"] = senderDisplayName
+        }
+        return result
     }
 
     /**
