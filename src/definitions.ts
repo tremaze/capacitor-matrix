@@ -146,6 +146,15 @@ export interface MatrixEvent {
 
 // Rooms
 
+export interface LatestEventPreview {
+  roomId: string;
+  senderId: string;
+  type: string;
+  content: Record<string, unknown>;
+  originServerTs: number;
+  senderDisplayName?: string;
+}
+
 export interface RoomSummary {
   roomId: string;
   name: string;
@@ -157,6 +166,7 @@ export interface RoomSummary {
   membership?: 'join' | 'invite' | 'leave' | 'ban';
   avatarUrl?: string;
   isDirect?: boolean;
+  latestEvent?: LatestEventPreview;
 }
 
 export interface RoomMember {

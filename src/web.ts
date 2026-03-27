@@ -1331,6 +1331,29 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       }
     }
 
+    // Build latestEvent from the room's last displayable timeline event
+    let latestEvent: RoomSummary['latestEvent'];
+    const timeline = room.getLiveTimeline().getEvents();
+    for (let i = timeline.length - 1; i >= 0; i--) {
+      const evt = timeline[i];
+      const evtType = evt.getType();
+      if (evtType === EventType.RoomMessage || evtType === EventType.Reaction) {
+        const relatesTo = evt.getContent()?.['m.relates_to'] as Record<string, unknown> | undefined;
+        if (relatesTo?.['rel_type'] === RelationType.Replace) continue;
+        const sender = evt.getSender() ?? '';
+        const senderMember = room.getMember(sender);
+        latestEvent = {
+          roomId: room.roomId,
+          senderId: sender,
+          type: evtType,
+          content: evt.getContent() as Record<string, unknown>,
+          originServerTs: evt.getTs(),
+          senderDisplayName: senderMember?.name ?? undefined,
+        };
+        break;
+      }
+    }
+
     return {
       roomId: room.roomId,
       name: room.name,
@@ -1342,6 +1365,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       membership: room.getMyMembership() as RoomSummary['membership'],
       avatarUrl,
       isDirect,
+      latestEvent,
     };
   }
 
