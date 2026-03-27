@@ -1238,6 +1238,7 @@ removeAllListeners() => Promise<void>
 | **`isEncrypted`** | <code>boolean</code>                                              |
 | **`unreadCount`** | <code>number</code>                                               |
 | **`lastEventTs`** | <code>number</code>                                               |
+| **`createdAt`**   | <code>number</code>                                               |
 | **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code>               |
 | **`avatarUrl`**   | <code>string</code>                                               |
 | **`isDirect`**    | <code>boolean</code>                                              |

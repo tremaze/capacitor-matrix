@@ -163,6 +163,7 @@ export interface RoomSummary {
   isEncrypted: boolean;
   unreadCount: number;
   lastEventTs?: number;
+  createdAt?: number;
   membership?: 'join' | 'invite' | 'leave' | 'ban';
   avatarUrl?: string;
   isDirect?: boolean;

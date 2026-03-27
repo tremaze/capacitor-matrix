@@ -32,6 +32,8 @@ class MatrixSDKBridge {
     private var syncStateObserver: SyncStateObserverProxy?
     private let subscriptionLock = NSLock()
     private var receiptSyncTask: Task<Void, Never>?
+    private var roomCreatedAtCache: [String: UInt64] = [:]
+    private let createdAtLock = NSLock()
     // Rooms currently being paginated by getRoomMessages — live listener suppresses events for these
     private var paginatingRooms = Set<String>()
     private let paginatingLock = NSLock()
@@ -603,9 +605,49 @@ class MatrixSDKBridge {
         }
         var result: [[String: Any]] = []
         for room in c.rooms() {
-            result.append(try await Self.serializeRoom(room))
+            var dict = try await Self.serializeRoom(room)
+            if dict["lastEventTs"] as? UInt64 == nil {
+                if let ts = await fetchRoomCreatedAt(roomId: room.id()) {
+                    dict["createdAt"] = ts
+                }
+            }
+            result.append(dict)
         }
         return result
+    }
+
+    private func fetchRoomCreatedAt(roomId: String) async -> UInt64? {
+        createdAtLock.lock()
+        let cached = roomCreatedAtCache[roomId]
+        createdAtLock.unlock()
+        if let cached { return cached }
+        guard let session = sessionStore.load() else { return nil }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        guard let encodedRoomId = roomId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(baseUrl)/_matrix/client/v3/rooms/\(encodedRoomId)/state") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let statusCode = (response as? HTTPURLResponse)?.statusCode,
+              statusCode >= 200, statusCode < 300,
+              let events = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return nil
+        }
+        for event in events {
+            if event["type"] as? String == "m.room.create",
+               let ts = event["origin_server_ts"] as? UInt64 {
+                createdAtLock.lock()
+                roomCreatedAtCache[roomId] = ts
+                createdAtLock.unlock()
+                return ts
+            }
+        }
+        return nil
     }
 
     func getRoomMembers(roomId: String) async throws -> [[String: Any]] {
@@ -728,7 +770,9 @@ class MatrixSDKBridge {
 
             // Reset cursor on initial load
             if !isPagination {
+                paginatingLock.lock()
                 oldestReturnedEventId.removeValue(forKey: roomId)
+                paginatingLock.unlock()
             }
 
             // Paginate when: first load with too few items, OR explicit pagination request
@@ -763,7 +807,11 @@ class MatrixSDKBridge {
         let allEvents = collector.events
         var events: [[String: Any]]
 
-        if let cursorId = oldestReturnedEventId[roomId], from != nil {
+        paginatingLock.lock()
+        let cursorId = oldestReturnedEventId[roomId]
+        paginatingLock.unlock()
+
+        if let cursorId = cursorId, from != nil {
             if let cursorIdx = allEvents.firstIndex(where: { ($0["eventId"] as? String) == cursorId }) {
                 let available = Array(allEvents.prefix(cursorIdx))
                 events = Array(available.suffix(limit))
@@ -776,7 +824,9 @@ class MatrixSDKBridge {
         }
 
         if let oldest = events.first, let eid = oldest["eventId"] as? String {
+            paginatingLock.lock()
             oldestReturnedEventId[roomId] = eid
+            paginatingLock.unlock()
         }
 
         // Apply receipt watermark
@@ -1475,7 +1525,7 @@ class MatrixSDKBridge {
         return dir.path
     }
 
-    private static func serializeRoom(_ room: Room) async throws -> [String: Any] {
+    static func serializeRoom(_ room: Room) async throws -> [String: Any] {
         let info = try await room.roomInfo()
         let encrypted = await room.isEncrypted()
         let membership: String = {
@@ -1651,6 +1701,7 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
 
     var contentDict: [String: Any] = [:]
     var eventType = "m.room.message"
+    var stateKey: String? = nil
 
     let content = eventItem.content
     switch content {
@@ -1707,6 +1758,7 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
         }
     case .roomMembership(let userId, let userDisplayName, let change, _):
         eventType = "m.room.member"
+        stateKey = userId
         let membership: String
         switch change {
         case .joined, .invitationAccepted:
@@ -1726,8 +1778,8 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
         }
         contentDict["membership"] = membership
         contentDict["displayname"] = userDisplayName ?? userId
-        contentDict["stateKey"] = userId
-    case .state(_, let stateContent):
+    case .state(let sk, let stateContent):
+        stateKey = sk
         switch stateContent {
         case .roomCreate:
             eventType = "m.room.create"
@@ -1767,7 +1819,13 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
         }
     }
 
-    return [
+    // Build unsigned dict — include transaction_id when available
+    var unsignedDict: [String: Any]? = nil
+    if case .transactionId(let txnId) = eventItem.eventOrTransactionId {
+        unsignedDict = ["transaction_id": txnId]
+    }
+
+    var result: [String: Any] = [
         "eventId": eventId,
         "roomId": roomId,
         "senderId": eventItem.sender,
@@ -1777,6 +1835,13 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
         "status": status,
         "readBy": readBy as Any,
     ]
+    if let sk = stateKey {
+        result["stateKey"] = sk
+    }
+    if let ud = unsignedDict {
+        result["unsigned"] = ud
+    }
+    return result
 }
 
 // MARK: - Live Timeline Listener (for sync subscriptions)
@@ -1796,19 +1861,14 @@ class LiveTimelineListener: TimelineListener {
         self.isPaginating = isPaginating
     }
 
-    /// Emit a room update with unread count and latest event preview.
+    /// Emit a room update with full room summary.
     private func emitRoomUpdate() {
         Task {
-            let unreadCount: Int
-            if let info = try? await room.roomInfo() {
-                unreadCount = Int(info.numUnreadMessages ?? 0)
+            let summary: [String: Any]
+            if let s = try? await MatrixSDKBridge.serializeRoom(room) {
+                summary = s
             } else {
-                unreadCount = 0
-            }
-            var summary: [String: Any] = ["roomId": roomId, "unreadCount": unreadCount]
-            let latestEvent = await room.latestEvent()
-            if let le = serializeLatestEventValue(latestEvent, roomId: roomId) {
-                summary["latestEvent"] = le
+                summary = ["roomId": roomId]
             }
             onRoomUpdate(roomId, summary)
         }

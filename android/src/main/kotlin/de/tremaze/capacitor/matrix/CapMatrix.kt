@@ -18,8 +18,10 @@ import org.matrix.rustcomponents.sdk.EventSendState
 import org.matrix.rustcomponents.sdk.EventTimelineItem
 import org.matrix.rustcomponents.sdk.LatestEventValue
 import org.matrix.rustcomponents.sdk.ProfileDetails
+import org.matrix.rustcomponents.sdk.MembershipChange
 import org.matrix.rustcomponents.sdk.MembershipState
 import org.matrix.rustcomponents.sdk.MessageType
+import org.matrix.rustcomponents.sdk.OtherState
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.RecoveryException
@@ -69,6 +71,7 @@ class MatrixSDKBridge(private val context: Context) {
     private val paginatingRooms = Collections.synchronizedSet(mutableSetOf<String>())
     // Per-room tracking of the oldest event ID returned to JS, used for pagination cursor
     private val oldestReturnedEventId = mutableMapOf<String, String>()
+    private val roomCreatedAtCache = mutableMapOf<String, Long>()
     private var receiptSyncJob: Job? = null
     // Receipt cache: roomId → (eventId → set of userIds who sent a read receipt)
     // Populated by the parallel v2 receipt sync since sliding sync doesn't deliver
@@ -285,19 +288,11 @@ class MatrixSDKBridge(private val context: Context) {
                 val handle = timeline.addListener(object : TimelineListener {
                     private fun emitRoomUpdate() {
                         scope.launch {
-                            val unreadCount = try {
-                                room.roomInfo().numUnreadMessages?.toInt() ?: 0
-                            } catch (_: Exception) { 0 }
-                            val summary = mutableMapOf<String, Any?>(
-                                "roomId" to roomId,
-                                "unreadCount" to unreadCount,
-                            )
-                            try {
-                                val le = serializeLatestEvent(room.latestEvent(), roomId)
-                                if (le != null) {
-                                    summary["latestEvent"] = le
-                                }
-                            } catch (_: Exception) {}
+                            val summary = try {
+                                serializeRoom(room)
+                            } catch (_: Exception) {
+                                mapOf<String, Any?>("roomId" to roomId)
+                            }
                             onRoomUpdate(roomId, summary)
                         }
                     }
@@ -374,9 +369,43 @@ class MatrixSDKBridge(private val context: Context) {
         val c = requireClient()
         val result = mutableListOf<Map<String, Any?>>()
         for (room in c.rooms()) {
-            result.add(serializeRoom(room))
+            val dict = serializeRoom(room).toMutableMap()
+            if (dict["lastEventTs"] == null) {
+                fetchRoomCreatedAt(room.id())?.let { dict["createdAt"] = it }
+            }
+            result.add(dict)
         }
         return result
+    }
+
+    private fun fetchRoomCreatedAt(roomId: String): Long? {
+        roomCreatedAtCache[roomId]?.let { return it }
+        val session = sessionStore.load() ?: return null
+        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val encodedRoomId = java.net.URLEncoder.encode(roomId, "UTF-8")
+        val url = URL("$baseUrl/_matrix/client/v3/rooms/$encodedRoomId/state")
+        return try {
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) return null
+            val body = connection.inputStream.bufferedReader().readText()
+            val events = org.json.JSONArray(body)
+            for (i in 0 until events.length()) {
+                val event = events.getJSONObject(i)
+                if (event.optString("type") == "m.room.create") {
+                    val ts = event.optLong("origin_server_ts", -1)
+                    if (ts > 0) {
+                        roomCreatedAtCache[roomId] = ts
+                        return ts
+                    }
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
     }
 
     suspend fun getRoomMembers(roomId: String): List<Map<String, Any?>> {
@@ -1392,6 +1421,7 @@ class MatrixSDKBridge(private val context: Context) {
 
         val contentMap = mutableMapOf<String, Any?>()
         var eventType = "m.room.message"
+        var stateKey: String? = null
 
         try {
             val content = eventItem.content
@@ -1462,7 +1492,30 @@ class MatrixSDKBridge(private val context: Context) {
                         }
                     }
                 }
-                is TimelineItemContent.RoomMembership -> eventType = "m.room.member"
+                is TimelineItemContent.RoomMembership -> {
+                    eventType = "m.room.member"
+                    stateKey = content.userId
+                    val membership = when (content.change) {
+                        MembershipChange.JOINED, MembershipChange.INVITATION_ACCEPTED -> "join"
+                        MembershipChange.LEFT -> "leave"
+                        MembershipChange.BANNED, MembershipChange.KICKED_AND_BANNED -> "ban"
+                        MembershipChange.INVITED -> "invite"
+                        MembershipChange.KICKED -> "leave"
+                        MembershipChange.UNBANNED -> "leave"
+                        else -> "join"
+                    }
+                    contentMap["membership"] = membership
+                    contentMap["displayname"] = content.userDisplayName ?: content.userId
+                }
+                is TimelineItemContent.State -> {
+                    stateKey = content.stateKey
+                    when (content.content) {
+                        is OtherState.RoomCreate -> eventType = "m.room.create"
+                        is OtherState.RoomName -> eventType = "m.room.name"
+                        is OtherState.RoomTopic -> eventType = "m.room.topic"
+                        else -> eventType = "m.room.unknown"
+                    }
+                }
                 else -> {}
             }
         } catch (e: Exception) {
@@ -1501,7 +1554,13 @@ class MatrixSDKBridge(private val context: Context) {
             status = "sent"
         }
 
-        return mapOf(
+        // Build unsigned dict — include transaction_id when available
+        val unsigned: Map<String, Any?>? = when (val id = eventItem.eventOrTransactionId) {
+            is EventOrTransactionId.TransactionId -> mapOf("transaction_id" to id.transactionId)
+            else -> null
+        }
+
+        val result = mutableMapOf<String, Any?>(
             "eventId" to eventId,
             "roomId" to roomId,
             "senderId" to eventItem.sender,
@@ -1511,6 +1570,13 @@ class MatrixSDKBridge(private val context: Context) {
             "status" to status,
             "readBy" to readBy,
         )
+        if (stateKey != null) {
+            result["stateKey"] = stateKey
+        }
+        if (unsigned != null) {
+            result["unsigned"] = unsigned
+        }
+        return result
     }
 
     // ── Receipt Sync (parallel v2 sync for read receipts) ──────

@@ -50,6 +50,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   private _tokenRefreshResolve?: (tokens: { accessToken: string; refreshToken?: string }) => void;
   private _tokenRefreshTimeout?: ReturnType<typeof setTimeout>;
+  private _roomUpdateTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   private readonly _cryptoCallbacks = {
     getSecretStorageKey: async (
@@ -276,6 +277,19 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
             }, 100);
           }
         }
+      }
+
+      // Debounced roomUpdated emission so room list stays current (unread count, sort order)
+      if (room) {
+        const existing = this._roomUpdateTimers.get(room.roomId);
+        if (existing) clearTimeout(existing);
+        this._roomUpdateTimers.set(room.roomId, setTimeout(() => {
+          this._roomUpdateTimers.delete(room.roomId);
+          this.notifyListeners('roomUpdated', {
+            roomId: room.roomId,
+            summary: this.serializeRoom(room),
+          });
+        }, 200));
       }
     });
 
@@ -1362,6 +1376,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       isEncrypted: room.hasEncryptionStateEvent(),
       unreadCount: room.getUnreadNotificationCount() ?? 0,
       lastEventTs: room.getLastActiveTimestamp() || undefined,
+      createdAt: room.currentState.getStateEvents('m.room.create', '')?.getTs() ?? undefined,
       membership: room.getMyMembership() as RoomSummary['membership'],
       avatarUrl,
       isDirect,
