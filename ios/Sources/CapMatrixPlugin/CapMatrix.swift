@@ -28,6 +28,7 @@ class MatrixSDKBridge {
     // Keep strong references so GC doesn't cancel subscriptions
     private var timelineListenerHandles: [Any] = []
     private var syncStateHandle: TaskHandle?
+    private var platformInitialized = false
     private var syncStateObserver: SyncStateObserverProxy?
     private let subscriptionLock = NSLock()
     private var receiptSyncTask: Task<Void, Never>?
@@ -175,11 +176,11 @@ class MatrixSDKBridge {
     }
 
     func updateAccessToken(accessToken: String) async throws {
-        guard let c = client else {
+        guard client != nil else {
             throw MatrixBridgeError.notLoggedIn
         }
 
-        // Stop sync service but keep the client (preserves crypto state)
+        // Stop sync service and clean up references
         await syncService?.stop()
         syncService = nil
         syncStateHandle = nil
@@ -189,10 +190,21 @@ class MatrixSDKBridge {
         roomTimelines.removeAll()
         subscribedRoomIds.removeAll()
 
-        // Restore session on the existing client with the new token
         guard let oldSession = sessionStore.load() else {
             throw MatrixBridgeError.custom("No persisted session to update")
         }
+
+        // Build a new client pointing to the same data directory (preserves crypto store).
+        // The Rust SDK's restoreSession() can only be called once per Client instance.
+        let dataDir = Self.dataDirectory()
+        let cacheDir = Self.cacheDirectory()
+
+        let newClient = try await ClientBuilder()
+            .homeserverUrl(url: oldSession.homeserverUrl)
+            .sessionPaths(dataPath: dataDir, cachePath: cacheDir)
+            .slidingSyncVersionBuilder(versionBuilder: .native)
+            .autoEnableCrossSigning(autoEnableCrossSigning: true)
+            .build()
 
         let newSession = Session(
             accessToken: accessToken,
@@ -204,9 +216,9 @@ class MatrixSDKBridge {
             slidingSyncVersion: .native
         )
 
-        try await c.restoreSession(session: newSession)
+        try await newClient.restoreSession(session: newSession)
+        client = newClient
 
-        // Update persisted session
         let updatedInfo = MatrixSessionInfo(
             accessToken: accessToken,
             userId: oldSession.userId,
@@ -228,16 +240,19 @@ class MatrixSDKBridge {
             throw MatrixBridgeError.notLoggedIn
         }
 
-        // Enable Rust SDK tracing to diagnose sync errors
-        let tracingConfig = TracingConfiguration(
-            logLevel: .warn,
-            traceLogPacks: [],
-            extraTargets: ["matrix_sdk", "matrix_sdk_ui"],
-            writeToStdoutOrSystem: true,
-            writeToFiles: nil,
-            sentryDsn: nil
-        )
-        try? initPlatform(config: tracingConfig, useLightweightTokioRuntime: false)
+        // Enable Rust SDK tracing (once — calling initPlatform twice panics)
+        if !platformInitialized {
+            let tracingConfig = TracingConfiguration(
+                logLevel: .warn,
+                traceLogPacks: [],
+                extraTargets: ["matrix_sdk", "matrix_sdk_ui"],
+                writeToStdoutOrSystem: true,
+                writeToFiles: nil,
+                sentryDsn: nil
+            )
+            try? initPlatform(config: tracingConfig, useLightweightTokioRuntime: false)
+            platformInitialized = true
+        }
 
         print("[CapMatrix] startSync: building sync service...")
         let service = try await c.syncService().finish()
@@ -527,6 +542,23 @@ class MatrixSDKBridge {
                 print("[CapMatrix]   room \(roomId): FAILED: \(error)")
             }
         }
+
+        // Preload messages for all rooms in the background so paginateBackwards
+        // has already run by the time the user opens a room.
+        Task {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            await withTaskGroup(of: Void.self) { group in
+                for (_, roomId) in roomsToSubscribe {
+                    group.addTask { [weak self] in
+                        guard let self = self, let timeline = self.roomTimelines[roomId] else { return }
+                        let tRoom = CFAbsoluteTimeGetCurrent()
+                        _ = try? await timeline.paginateBackwards(numEvents: 30)
+                        print("[CapMatrix] [PERF] preload \(roomId.prefix(12))… paginateBackwards=\(self.ms(tRoom, CFAbsoluteTimeGetCurrent()))ms")
+                    }
+                }
+            }
+            print("[CapMatrix] [PERF] preload ALL rooms done in \(ms(t0, CFAbsoluteTimeGetCurrent()))ms")
+        }
     }
 
     func stopSync() async throws {
@@ -666,8 +698,12 @@ class MatrixSDKBridge {
     }
 
     func getRoomMessages(roomId: String, limit: Int, from: String?) async throws -> [String: Any] {
+        let t0 = CFAbsoluteTimeGetCurrent()
         let room = try requireRoom(roomId: roomId)
+        let t1 = CFAbsoluteTimeGetCurrent()
         let timeline = try await getOrCreateTimeline(room: room)
+        let t2 = CFAbsoluteTimeGetCurrent()
+        print("[CapMatrix] [PERF] getRoomMessages(\(roomId.prefix(12))…) requireRoom=\(ms(t0,t1))ms getOrCreateTimeline=\(ms(t1,t2))ms")
 
         // Suppress live listener while we paginate to avoid flooding JS with historical events
         paginatingLock.lock()
@@ -675,15 +711,20 @@ class MatrixSDKBridge {
         paginatingLock.unlock()
 
         let collector = TimelineItemCollector(roomId: roomId)
+        let t3 = CFAbsoluteTimeGetCurrent()
         let handle = await timeline.addListener(listener: collector)
+        let t4 = CFAbsoluteTimeGetCurrent()
+        print("[CapMatrix] [PERF] addListener=\(ms(t3,t4))ms")
 
         var hitStart = false
         do {
             // Wait for the initial Reset snapshot before paginating
+            let tWait1 = CFAbsoluteTimeGetCurrent()
             let gotInitial = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+            let tWait1Done = CFAbsoluteTimeGetCurrent()
             let countBefore = collector.events.count
             let isPagination = from != nil
-            print("[CapMatrix] getRoomMessages: initial snapshot: \(countBefore) items, gotInitial=\(gotInitial), from=\(from ?? "nil")")
+            print("[CapMatrix] [PERF] waitForInitial=\(ms(tWait1,tWait1Done))ms gotInitial=\(gotInitial) items=\(countBefore) from=\(from ?? "nil")")
 
             // Reset cursor on initial load
             if !isPagination {
@@ -692,14 +733,18 @@ class MatrixSDKBridge {
 
             // Paginate when: first load with too few items, OR explicit pagination request
             if isPagination || countBefore < limit {
+                let tPag = CFAbsoluteTimeGetCurrent()
                 hitStart = try await timeline.paginateBackwards(numEvents: UInt16(limit))
-                print("[CapMatrix] getRoomMessages: paginated, hitStart=\(hitStart)")
+                let tPagDone = CFAbsoluteTimeGetCurrent()
+                print("[CapMatrix] [PERF] paginateBackwards=\(ms(tPag,tPagDone))ms hitStart=\(hitStart)")
 
                 // If there were new events, wait for the diffs to arrive via the listener
                 if !hitStart {
+                    let tWait2 = CFAbsoluteTimeGetCurrent()
                     _ = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+                    let tWait2Done = CFAbsoluteTimeGetCurrent()
+                    print("[CapMatrix] [PERF] waitForPagination=\(ms(tWait2,tWait2Done))ms items=\(collector.events.count)")
                 }
-                print("[CapMatrix] getRoomMessages: after pagination: \(collector.events.count) items (was \(countBefore))")
             }
         } catch {
             handle.cancel()
@@ -714,38 +759,30 @@ class MatrixSDKBridge {
         paginatingRooms.remove(roomId)
         paginatingLock.unlock()
 
+        let tSlice = CFAbsoluteTimeGetCurrent()
         let allEvents = collector.events
         var events: [[String: Any]]
 
         if let cursorId = oldestReturnedEventId[roomId], from != nil {
-            // Pagination: find the cursor event and return events before it
             if let cursorIdx = allEvents.firstIndex(where: { ($0["eventId"] as? String) == cursorId }) {
                 let available = Array(allEvents.prefix(cursorIdx))
                 events = Array(available.suffix(limit))
             } else {
-                // Cursor not found (shouldn't happen) — fall back to empty
                 print("[CapMatrix] getRoomMessages: cursor eventId \(cursorId) not found in timeline")
                 events = []
             }
         } else {
-            // Initial load: return newest events
             events = Array(allEvents.suffix(limit))
         }
 
-        // Update cursor to the oldest event we're returning
         if let oldest = events.first, let eid = oldest["eventId"] as? String {
             oldestReturnedEventId[roomId] = eid
         }
 
-        // Apply receipt watermark: if any own event has readBy data,
-        // all earlier own events in the timeline are also read.
-        // The SDK only attaches receipts to the specific event they target,
-        // but in Matrix a read receipt implies all prior events are read too.
-        // Only events BEFORE the watermark are marked — events after it are unread.
+        // Apply receipt watermark
         let myUserId = client.flatMap({ try? $0.userId() })
         var watermarkReadBy: [String]? = nil
         var watermarkIndex = -1
-        // Walk backwards (newest first) to find the newest own event with a receipt
         for i in stride(from: events.count - 1, through: 0, by: -1) {
             let evt = events[i]
             let sender = evt["senderId"] as? String
@@ -757,7 +794,6 @@ class MatrixSDKBridge {
                 }
             }
         }
-        // Apply watermark only to own events BEFORE the watermark (older)
         if let watermark = watermarkReadBy, watermarkIndex >= 0 {
             for i in 0..<watermarkIndex {
                 let sender = events[i]["senderId"] as? String
@@ -770,17 +806,20 @@ class MatrixSDKBridge {
                 }
             }
         }
+        let tSliceDone = CFAbsoluteTimeGetCurrent()
 
-        // Return a pagination token so the JS layer knows more messages are available.
-        // The Rust SDK timeline handles pagination state internally, so we use a
-        // synthetic token ("more") to signal that further back-pagination is possible.
-        // Also stop if pagination returned no new events (timeline fully loaded).
         let nextBatch: String? = (hitStart || events.isEmpty) ? nil : "more"
+
+        print("[CapMatrix] [PERF] getRoomMessages TOTAL=\(ms(t0,tSliceDone))ms slicing+watermark=\(ms(tSlice,tSliceDone))ms returning \(events.count) events")
 
         return [
             "events": events,
             "nextBatch": nextBatch as Any
         ]
+    }
+
+    private func ms(_ start: CFAbsoluteTime, _ end: CFAbsoluteTime) -> Int {
+        return Int((end - start) * 1000)
     }
 
     func markRoomAsRead(roomId: String, eventId: String) async throws {
@@ -1333,18 +1372,25 @@ class MatrixSDKBridge {
         let isDirect = info.isDirect
         let avatarUrl: String? = nil // Rust SDK doesn't expose avatar URL via RoomInfo yet
 
-        return [
+        let latestEvent = await room.latestEvent()
+        let latestEventDict = serializeLatestEventValue(latestEvent, roomId: room.id())
+
+        var dict: [String: Any] = [
             "roomId": room.id(),
             "name": info.displayName ?? "",
             "topic": info.topic as Any,
             "memberCount": info.joinedMembersCount ?? 0,
             "isEncrypted": encrypted,
             "unreadCount": info.numUnreadMessages ?? 0,
-            "lastEventTs": nil as Int? as Any,
+            "lastEventTs": latestEventDict?["originServerTs"] as Any,
             "membership": membership,
             "avatarUrl": avatarUrl as Any,
             "isDirect": isDirect,
         ]
+        if let le = latestEventDict {
+            dict["latestEvent"] = le
+        }
+        return dict
     }
 
     private static func mapSyncState(_ state: SyncServiceState) -> String {
@@ -1364,6 +1410,89 @@ class MatrixSDKBridge {
 }
 
 // MARK: - Timeline Serialization Helpers
+
+/// Serialize a LatestEventValue (from room.latestEvent()) into a lightweight dictionary
+/// for last-message previews. Does NOT create a timeline subscription.
+private func serializeLatestEventValue(_ value: LatestEventValue, roomId: String) -> [String: Any]? {
+    let timestamp: UInt64
+    let sender: String
+    let profile: ProfileDetails
+    let content: TimelineItemContent
+
+    switch value {
+    case .none:
+        return nil
+    case .remote(let ts, let s, _, let p, let c):
+        timestamp = ts
+        sender = s
+        profile = p
+        content = c
+    case .local(let ts, let s, let p, let c, _):
+        timestamp = ts
+        sender = s
+        profile = p
+        content = c
+    @unknown default:
+        return nil
+    }
+
+    var contentDict: [String: Any] = [:]
+    var eventType = "m.room.message"
+
+    switch content {
+    case .msgLike(let msgLikeContent):
+        switch msgLikeContent.kind {
+        case .message(let messageContent):
+            contentDict["body"] = messageContent.body
+            switch messageContent.msgType {
+            case .text:
+                contentDict["msgtype"] = "m.text"
+            case .image:
+                contentDict["msgtype"] = "m.image"
+            case .file:
+                contentDict["msgtype"] = "m.file"
+            case .audio:
+                contentDict["msgtype"] = "m.audio"
+            case .video:
+                contentDict["msgtype"] = "m.video"
+            case .emote:
+                contentDict["msgtype"] = "m.emote"
+            case .notice:
+                contentDict["msgtype"] = "m.notice"
+            default:
+                contentDict["msgtype"] = "m.text"
+            }
+        case .unableToDecrypt:
+            contentDict["body"] = "Unable to decrypt message"
+            contentDict["msgtype"] = "m.text"
+            contentDict["encrypted"] = true
+        case .redacted:
+            eventType = "m.room.redaction"
+            contentDict["body"] = "Message deleted"
+        default:
+            eventType = "m.room.unknown"
+        }
+    default:
+        eventType = "m.room.unknown"
+    }
+
+    var senderDisplayName: String? = nil
+    if case .ready(let displayName, _, _) = profile {
+        senderDisplayName = displayName
+    }
+
+    var dict: [String: Any] = [
+        "roomId": roomId,
+        "senderId": sender,
+        "type": eventType,
+        "content": contentDict,
+        "originServerTs": timestamp,
+    ]
+    if let name = senderDisplayName {
+        dict["senderDisplayName"] = name
+    }
+    return dict
+}
 
 /// Extract the event ID string from an EventOrTransactionId enum.
 private func extractEventId(_ eventOrTxnId: EventOrTransactionId) -> String? {
@@ -1459,6 +1588,35 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
                 ] as [String: Any]
             }
         }
+    case .roomMembership(let userId, let userDisplayName, let change, _):
+        eventType = "m.room.member"
+        let membership: String
+        switch change {
+        case .joined, .invitationAccepted:
+            membership = "join"
+        case .left:
+            membership = "leave"
+        case .banned, .kickedAndBanned:
+            membership = "ban"
+        case .invited:
+            membership = "invite"
+        case .kicked:
+            membership = "leave"
+        case .unbanned:
+            membership = "leave"
+        default:
+            membership = "join"
+        }
+        contentDict["membership"] = membership
+        contentDict["displayname"] = userDisplayName ?? userId
+        contentDict["stateKey"] = userId
+    case .state(_, let stateContent):
+        switch stateContent {
+        case .roomCreate:
+            eventType = "m.room.create"
+        default:
+            eventType = "m.room.unknown"
+        }
     default:
         eventType = "m.room.unknown"
     }
@@ -1521,7 +1679,7 @@ class LiveTimelineListener: TimelineListener {
         self.isPaginating = isPaginating
     }
 
-    /// Emit a room update with the current unread count fetched from the room.
+    /// Emit a room update with unread count and latest event preview.
     private func emitRoomUpdate() {
         Task {
             let unreadCount: Int
@@ -1530,7 +1688,12 @@ class LiveTimelineListener: TimelineListener {
             } else {
                 unreadCount = 0
             }
-            onRoomUpdate(roomId, ["roomId": roomId, "unreadCount": unreadCount])
+            var summary: [String: Any] = ["roomId": roomId, "unreadCount": unreadCount]
+            let latestEvent = await room.latestEvent()
+            if let le = serializeLatestEventValue(latestEvent, roomId: roomId) {
+                summary["latestEvent"] = le
+            }
+            onRoomUpdate(roomId, summary)
         }
     }
 
