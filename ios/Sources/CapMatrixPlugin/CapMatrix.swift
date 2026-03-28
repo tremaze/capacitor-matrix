@@ -39,6 +39,12 @@ class MatrixSDKBridge {
     private let paginatingLock = NSLock()
     // Per-room tracking of the oldest event ID returned to JS, used for pagination cursor
     private var oldestReturnedEventId: [String: String] = [:]
+    // Set on session restore (loginWithToken) to filter out rooms that are cached as
+    // joined locally but are no longer joined according to the server.  Tuwunel's
+    // sliding sync does not push explicit leave events on resume, so without this
+    // reconciliation those rooms would stay in the list indefinitely.
+    private var cachedRoomIds: Set<String>? = nil      // rooms the SDK knew about before sync
+    private var serverJoinedRoomIds: Set<String>? = nil // authoritative list from /joined_rooms
 
     // MARK: - Auth
 
@@ -133,6 +139,15 @@ class MatrixSDKBridge {
         try await newClient.restoreSession(session: session)
         client = newClient
 
+        // Snapshot which rooms the SDK knows about from the cache, then fetch the
+        // server's authoritative joined-rooms list concurrently.  The combination
+        // lets isStaleRoom() filter out cached rooms the user has since left without
+        // waiting for the server to push explicit leave events (which Tuwunel doesn't).
+        async let serverRooms = fetchJoinedRoomIds(homeserverUrl: homeserverUrl, accessToken: accessToken)
+        cachedRoomIds = Set(newClient.rooms().map { $0.id() })
+        serverJoinedRoomIds = await serverRooms
+        print("[CapMatrix] _loginWithToken: cachedRooms=\(cachedRoomIds?.count ?? 0), serverJoined=\(serverJoinedRoomIds?.count ?? 0)")
+
         let info = MatrixSessionInfo(
             accessToken: accessToken,
             userId: userId,
@@ -152,6 +167,8 @@ class MatrixSDKBridge {
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
         subscribedRoomIds.removeAll()
+        cachedRoomIds = nil
+        serverJoinedRoomIds = nil
         try await client?.logout()
         client = nil
         sessionStore.clear()
@@ -164,6 +181,8 @@ class MatrixSDKBridge {
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
         subscribedRoomIds.removeAll()
+        cachedRoomIds = nil
+        serverJoinedRoomIds = nil
         sessionStore.clear()
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("matrix_sdk")
@@ -521,6 +540,8 @@ class MatrixSDKBridge {
             // Only subscribe to rooms the SDK considers joined; left/invited rooms
             // from a cached session would produce M_FORBIDDEN on timeline access.
             guard room.membership() == .joined else { continue }
+            // Skip rooms that were cached as joined but are no longer on the server.
+            guard !isStaleRoom(roomId: roomId) else { continue }
             subscribedRoomIds.insert(roomId)
             roomsToSubscribe.append((room, roomId))
         }
@@ -545,13 +566,11 @@ class MatrixSDKBridge {
                 print("[CapMatrix]   room \(roomId): listener added")
             } catch {
                 // Remove from the subscribed set so a later sync cycle can retry
-                // once the SDK has updated its state.  Emit a leave update so JS
-                // removes a room that turned out to be inaccessible from the list.
+                // once the SDK has updated its state.
                 subscriptionLock.lock()
                 subscribedRoomIds.remove(roomId)
                 subscriptionLock.unlock()
                 print("[CapMatrix]   room \(roomId): FAILED: \(error)")
-                onRoomUpdate(roomId, ["id": roomId, "membership": "leave"])
             }
         }
 
@@ -616,6 +635,7 @@ class MatrixSDKBridge {
         var result: [[String: Any]] = []
         for room in c.rooms() {
             guard room.membership() == .joined else { continue }
+            guard !isStaleRoom(roomId: room.id()) else { continue }
             do {
                 var dict = try await Self.serializeRoom(room)
                 if dict["lastEventTs"] as? UInt64 == nil {
@@ -1577,6 +1597,27 @@ class MatrixSDKBridge {
     }
 
     // MARK: - Helpers
+
+    /// Returns true if this room was in the local cache at login time but is absent
+    /// from the server's /joined_rooms list — i.e. it is a stale left room.
+    private func isStaleRoom(roomId: String) -> Bool {
+        guard let serverIds = serverJoinedRoomIds,
+              let cachedIds = cachedRoomIds else { return false }
+        return cachedIds.contains(roomId) && !serverIds.contains(roomId)
+    }
+
+    /// Fetches the caller's current joined room IDs from the homeserver.
+    private func fetchJoinedRoomIds(homeserverUrl: String, accessToken: String) async -> Set<String>? {
+        let baseUrl = homeserverUrl.hasSuffix("/") ? String(homeserverUrl.dropLast()) : homeserverUrl
+        guard let url = URL(string: "\(baseUrl)/_matrix/client/v3/joined_rooms") else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rooms = json["joined_rooms"] as? [String] else { return nil }
+        return Set(rooms)
+    }
 
     private static func dataDirectory() -> String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

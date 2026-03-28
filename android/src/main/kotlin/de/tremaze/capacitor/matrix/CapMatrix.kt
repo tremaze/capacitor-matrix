@@ -81,6 +81,12 @@ class MatrixSDKBridge(private val context: Context) {
     )
 
     private val sessionStore by lazy { MatrixSessionStore(context) }
+    // Set on session restore (loginWithToken) to reconcile stale cached rooms.
+    // Tuwunel's sliding sync does not push leave events on resume, so rooms left on
+    // another client stay cached as JOINED.  cachedRoomIds captures the SDK's state
+    // before the first sync; serverJoinedRoomIds is the authoritative server list.
+    @Volatile private var cachedRoomIds: Set<String>? = null
+    @Volatile private var serverJoinedRoomIds: Set<String>? = null
 
     // ── Auth ──────────────────────────────────────────────
 
@@ -151,6 +157,12 @@ class MatrixSDKBridge(private val context: Context) {
         newClient.restoreSession(session)
         client = newClient
 
+        // Snapshot the rooms the SDK knows from cache, then fetch the server's
+        // authoritative joined list to identify stale left rooms.
+        cachedRoomIds = newClient.rooms().map { it.id() }.toSet()
+        serverJoinedRoomIds = fetchJoinedRoomIds(homeserverUrl, accessToken)
+        android.util.Log.d("CapMatrix", "loginWithToken: cached=${cachedRoomIds?.size}, serverJoined=${serverJoinedRoomIds?.size}")
+
         val info = SessionInfo(
             accessToken = accessToken,
             userId = userId,
@@ -170,6 +182,8 @@ class MatrixSDKBridge(private val context: Context) {
         timelineListenerHandles.clear()
         roomTimelines.clear()
         subscribedRoomIds.clear()
+        cachedRoomIds = null
+        serverJoinedRoomIds = null
         client?.logout()
         client = null
         sessionStore.clear()
@@ -184,6 +198,8 @@ class MatrixSDKBridge(private val context: Context) {
         timelineListenerHandles.clear()
         roomTimelines.clear()
         subscribedRoomIds.clear()
+        cachedRoomIds = null
+        serverJoinedRoomIds = null
         sessionStore.clear()
         val sdkDir = context.filesDir.resolve("matrix_sdk")
         sdkDir.deleteRecursively()
@@ -288,6 +304,7 @@ class MatrixSDKBridge(private val context: Context) {
             // would produce M_FORBIDDEN on timeline access.
             val currentMembership = try { room.membership() } catch (_: Exception) { continue }
             if (currentMembership != org.matrix.rustcomponents.sdk.Membership.JOINED) continue
+            if (isStaleRoom(roomId)) continue
             subscribedRoomIds.add(roomId)
             try {
                 val timeline = getOrCreateTimeline(room)
@@ -351,9 +368,7 @@ class MatrixSDKBridge(private val context: Context) {
                 timelineListenerHandles.add(handle)
             } catch (e: Exception) {
                 // Remove from the subscribed set so a later sync cycle can retry.
-                // Emit a leave update so JS removes an inaccessible room from the list.
                 subscribedRoomIds.remove(roomId)
-                onRoomUpdate(roomId, mapOf("roomId" to roomId, "membership" to "leave"))
                 android.util.Log.e("CapMatrix", "Failed to subscribe to room $roomId: ${e.message}")
             }
         }
@@ -381,6 +396,7 @@ class MatrixSDKBridge(private val context: Context) {
         for (room in c.rooms()) {
             val membership = try { room.membership() } catch (_: Exception) { continue }
             if (membership != org.matrix.rustcomponents.sdk.Membership.JOINED) continue
+            if (isStaleRoom(room.id())) continue
             try {
                 val dict = serializeRoom(room).toMutableMap()
                 if (dict["lastEventTs"] == null) {
@@ -392,6 +408,30 @@ class MatrixSDKBridge(private val context: Context) {
             }
         }
         return result
+    }
+
+    private fun isStaleRoom(roomId: String): Boolean {
+        val serverIds = serverJoinedRoomIds ?: return false
+        val cachedIds = cachedRoomIds ?: return false
+        return cachedIds.contains(roomId) && !serverIds.contains(roomId)
+    }
+
+    private fun fetchJoinedRoomIds(homeserverUrl: String, accessToken: String): Set<String>? {
+        return try {
+            val baseUrl = homeserverUrl.trimEnd('/')
+            val url = URL("$baseUrl/_matrix/client/v3/joined_rooms")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Authorization", "Bearer $accessToken")
+            if (connection.responseCode != 200) return null
+            val body = connection.inputStream.bufferedReader().readText()
+            val json = org.json.JSONObject(body)
+            val arr = json.optJSONArray("joined_rooms") ?: return null
+            (0 until arr.length()).map { arr.getString(it) }.toSet()
+        } catch (e: Exception) {
+            android.util.Log.w("CapMatrix", "fetchJoinedRoomIds failed: ${e.message}")
+            null
+        }
     }
 
     private fun fetchRoomCreatedAt(roomId: String): Long? {
