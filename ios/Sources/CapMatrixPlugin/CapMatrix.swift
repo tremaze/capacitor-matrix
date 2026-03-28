@@ -111,7 +111,11 @@ class MatrixSDKBridge {
         subscribedRoomIds.removeAll()
 
         let dataDir = Self.dataDirectory()
-        let cacheDir = Self.cacheDirectory()
+        // Clear the cache on session restore: the Rust SDK retains room subscriptions
+        // in the cache and tries to re-establish them on resume.  For rooms the user
+        // has left, this produces repeated 403 errors and the rooms stay in the list.
+        // Android's SQLite store handles stale rooms gracefully; iOS's file cache does not.
+        let cacheDir = Self.cacheDirectory(clearFirst: true)
 
         let newClient = try await ClientBuilder()
             .homeserverUrl(url: homeserverUrl)
@@ -1571,8 +1575,11 @@ class MatrixSDKBridge {
     }
 
     /// Separate cache directory for sliding sync state.
-    /// Pass `clearFirst: true` on fresh logins to wipe any stale sync state.
-    /// Session restores preserve the cache so the Rust SDK can resume incrementally.
+    /// Pass `clearFirst: true` (the default for login and loginWithToken) to wipe
+    /// stale room subscriptions from the cache; the iOS Rust SDK does not gracefully
+    /// handle 403s on cached rooms the user has since left.
+    /// Pass `clearFirst: false` only for token refreshes (updateAccessToken), where
+    /// room membership hasn't changed.
     private static func cacheDirectory(clearFirst: Bool = false) -> String {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("matrix_sdk_cache")
