@@ -1094,15 +1094,72 @@ class MatrixSDKBridge {
             throw MatrixBridgeError.notSupported("Invalid devices response")
         }
 
+        let crossSignedDeviceIds = await getCrossSignedDeviceIds(
+            baseUrl: baseUrl,
+            accessToken: session.accessToken,
+            userId: session.userId
+        )
+
         return devicesArray.map { device in
-            [
-                "deviceId": device["device_id"] as? String ?? "",
+            let deviceId = device["device_id"] as? String ?? ""
+            return [
+                "deviceId": deviceId,
                 "displayName": device["display_name"] as Any,
                 "lastSeenTs": device["last_seen_ts"] as Any,
                 "lastSeenIp": device["last_seen_ip"] as Any,
-                "isCrossSigningVerified": false, // TODO: wire up Rust SDK per-device verification
+                "isCrossSigningVerified": crossSignedDeviceIds.contains(deviceId),
             ]
         }
+    }
+
+    private func getCrossSignedDeviceIds(
+        baseUrl: String,
+        accessToken: String,
+        userId: String
+    ) async -> Set<String> {
+        guard let url = URL(string: "\(baseUrl)/_matrix/client/v3/keys/query") else {
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["device_keys": [userId: [] as [String]]]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let statusCode = (response as? HTTPURLResponse)?.statusCode,
+              statusCode >= 200, statusCode < 300,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+
+        guard let selfSigningKeys = json["self_signing_keys"] as? [String: Any],
+              let userSSK = selfSigningKeys[userId] as? [String: Any],
+              let sskKeys = userSSK["keys"] as? [String: String] else {
+            return []
+        }
+        let selfSigningKeyIds = Set(sskKeys.keys)
+
+        guard let deviceKeysMap = json["device_keys"] as? [String: Any],
+              let userDevices = deviceKeysMap[userId] as? [String: Any] else {
+            return []
+        }
+
+        var verifiedIds = Set<String>()
+        for (deviceId, deviceData) in userDevices {
+            guard let deviceDict = deviceData as? [String: Any],
+                  let signatures = deviceDict["signatures"] as? [String: Any],
+                  let userSignatures = signatures[userId] as? [String: String] else {
+                continue
+            }
+            let signatureKeyIds = Set(userSignatures.keys)
+            if !signatureKeyIds.isDisjoint(with: selfSigningKeyIds) {
+                verifiedIds.insert(deviceId)
+            }
+        }
+        return verifiedIds
     }
 
     func deleteDevice(deviceId: String) async throws {

@@ -769,18 +769,69 @@ class MatrixSDKBridge(private val context: Context) {
         val responseBody = connection.inputStream.bufferedReader().readText()
         val json = org.json.JSONObject(responseBody)
         val devicesArray = json.getJSONArray("devices")
+
+        val crossSignedDeviceIds = getCrossSignedDeviceIds(baseUrl, session.accessToken, session.userId)
+
         val devices = mutableListOf<Map<String, Any?>>()
         for (i in 0 until devicesArray.length()) {
             val device = devicesArray.getJSONObject(i)
+            val deviceId = device.getString("device_id")
             devices.add(mapOf(
-                "deviceId" to device.getString("device_id"),
+                "deviceId" to deviceId,
                 "displayName" to device.optString("display_name", null),
                 "lastSeenTs" to if (device.has("last_seen_ts")) device.getLong("last_seen_ts") else null,
                 "lastSeenIp" to device.optString("last_seen_ip", null),
-                "isCrossSigningVerified" to false, // TODO: wire up Rust SDK per-device verification
+                "isCrossSigningVerified" to crossSignedDeviceIds.contains(deviceId),
             ))
         }
         return devices
+    }
+
+    private fun getCrossSignedDeviceIds(
+        baseUrl: String,
+        accessToken: String,
+        userId: String
+    ): Set<String> {
+        return try {
+            val url = URL("$baseUrl/_matrix/client/v3/keys/query")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Authorization", "Bearer $accessToken")
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.doOutput = true
+
+            val body = org.json.JSONObject()
+            body.put("device_keys", org.json.JSONObject().put(userId, org.json.JSONArray()))
+            connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
+
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) return emptySet()
+
+            val responseBody = connection.inputStream.bufferedReader().readText()
+            val json = org.json.JSONObject(responseBody)
+
+            val selfSigningKeys = json.optJSONObject("self_signing_keys") ?: return emptySet()
+            val userSSK = selfSigningKeys.optJSONObject(userId) ?: return emptySet()
+            val sskKeys = userSSK.optJSONObject("keys") ?: return emptySet()
+            val selfSigningKeyIds = sskKeys.keys().asSequence().toSet()
+
+            val deviceKeysMap = json.optJSONObject("device_keys") ?: return emptySet()
+            val userDevices = deviceKeysMap.optJSONObject(userId) ?: return emptySet()
+
+            val verifiedIds = mutableSetOf<String>()
+            for (deviceId in userDevices.keys()) {
+                val deviceDict = userDevices.optJSONObject(deviceId) ?: continue
+                val signatures = deviceDict.optJSONObject("signatures") ?: continue
+                val userSignatures = signatures.optJSONObject(userId) ?: continue
+                val signatureKeyIds = userSignatures.keys().asSequence().toSet()
+                if (signatureKeyIds.any { it in selfSigningKeyIds }) {
+                    verifiedIds.add(deviceId)
+                }
+            }
+            verifiedIds
+        } catch (_: Exception) {
+            emptySet()
+        }
     }
 
     suspend fun deleteDevice(deviceId: String) {
