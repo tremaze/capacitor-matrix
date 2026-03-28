@@ -111,11 +111,7 @@ class MatrixSDKBridge {
         subscribedRoomIds.removeAll()
 
         let dataDir = Self.dataDirectory()
-        // Clear the cache on session restore: the Rust SDK retains room subscriptions
-        // in the cache and tries to re-establish them on resume.  For rooms the user
-        // has left, this produces repeated 403 errors and the rooms stay in the list.
-        // Android's SQLite store handles stale rooms gracefully; iOS's file cache does not.
-        let cacheDir = Self.cacheDirectory(clearFirst: true)
+        let cacheDir = Self.cacheDirectory()
 
         let newClient = try await ClientBuilder()
             .homeserverUrl(url: homeserverUrl)
@@ -522,6 +518,9 @@ class MatrixSDKBridge {
         for room in rooms {
             let roomId = room.id()
             if subscribedRoomIds.contains(roomId) { continue }
+            // Only subscribe to rooms the SDK considers joined; left/invited rooms
+            // from a cached session would produce M_FORBIDDEN on timeline access.
+            guard room.membership() == .joined else { continue }
             subscribedRoomIds.insert(roomId)
             roomsToSubscribe.append((room, roomId))
         }
@@ -545,7 +544,14 @@ class MatrixSDKBridge {
                 subscriptionLock.unlock()
                 print("[CapMatrix]   room \(roomId): listener added")
             } catch {
+                // Remove from the subscribed set so a later sync cycle can retry
+                // once the SDK has updated its state.  Emit a leave update so JS
+                // removes a room that turned out to be inaccessible from the list.
+                subscriptionLock.lock()
+                subscribedRoomIds.remove(roomId)
+                subscriptionLock.unlock()
                 print("[CapMatrix]   room \(roomId): FAILED: \(error)")
+                onRoomUpdate(roomId, ["id": roomId, "membership": "leave"])
             }
         }
 
@@ -609,13 +615,18 @@ class MatrixSDKBridge {
         }
         var result: [[String: Any]] = []
         for room in c.rooms() {
-            var dict = try await Self.serializeRoom(room)
-            if dict["lastEventTs"] as? UInt64 == nil {
-                if let ts = await fetchRoomCreatedAt(roomId: room.id()) {
-                    dict["createdAt"] = ts
+            guard room.membership() == .joined else { continue }
+            do {
+                var dict = try await Self.serializeRoom(room)
+                if dict["lastEventTs"] as? UInt64 == nil {
+                    if let ts = await fetchRoomCreatedAt(roomId: room.id()) {
+                        dict["createdAt"] = ts
+                    }
                 }
+                result.append(dict)
+            } catch {
+                print("[CapMatrix] getRooms: skipping \(room.id()): \(error)")
             }
-            result.append(dict)
         }
         return result
     }
@@ -1575,11 +1586,10 @@ class MatrixSDKBridge {
     }
 
     /// Separate cache directory for sliding sync state.
-    /// Pass `clearFirst: true` (the default for login and loginWithToken) to wipe
-    /// stale room subscriptions from the cache; the iOS Rust SDK does not gracefully
-    /// handle 403s on cached rooms the user has since left.
-    /// Pass `clearFirst: false` only for token refreshes (updateAccessToken), where
-    /// room membership hasn't changed.
+    /// Pass `clearFirst: true` only for fresh logins to wipe any previous session's data.
+    /// Session restores (loginWithToken, updateAccessToken) preserve the cache so the
+    /// Rust SDK resumes incrementally; stale left rooms are filtered by membership check
+    /// in getRooms() and subscribeToRoomTimelines() rather than by clearing the cache.
     private static func cacheDirectory(clearFirst: Bool = false) -> String {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("matrix_sdk_cache")
