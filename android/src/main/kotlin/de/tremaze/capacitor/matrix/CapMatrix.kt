@@ -284,6 +284,10 @@ class MatrixSDKBridge(private val context: Context) {
         for (room in c.rooms()) {
             val roomId = room.id()
             if (subscribedRoomIds.contains(roomId)) continue
+            // Only subscribe to joined rooms; stale left rooms from a cached session
+            // would produce M_FORBIDDEN on timeline access.
+            val currentMembership = try { room.membership() } catch (_: Exception) { continue }
+            if (currentMembership != org.matrix.rustcomponents.sdk.Membership.JOINED) continue
             subscribedRoomIds.add(roomId)
             try {
                 val timeline = getOrCreateTimeline(room)
@@ -346,6 +350,10 @@ class MatrixSDKBridge(private val context: Context) {
                 })
                 timelineListenerHandles.add(handle)
             } catch (e: Exception) {
+                // Remove from the subscribed set so a later sync cycle can retry.
+                // Emit a leave update so JS removes an inaccessible room from the list.
+                subscribedRoomIds.remove(roomId)
+                onRoomUpdate(roomId, mapOf("roomId" to roomId, "membership" to "leave"))
                 android.util.Log.e("CapMatrix", "Failed to subscribe to room $roomId: ${e.message}")
             }
         }
@@ -371,11 +379,17 @@ class MatrixSDKBridge(private val context: Context) {
         val c = requireClient()
         val result = mutableListOf<Map<String, Any?>>()
         for (room in c.rooms()) {
-            val dict = serializeRoom(room).toMutableMap()
-            if (dict["lastEventTs"] == null) {
-                fetchRoomCreatedAt(room.id())?.let { dict["createdAt"] = it }
+            val membership = try { room.membership() } catch (_: Exception) { continue }
+            if (membership != org.matrix.rustcomponents.sdk.Membership.JOINED) continue
+            try {
+                val dict = serializeRoom(room).toMutableMap()
+                if (dict["lastEventTs"] == null) {
+                    fetchRoomCreatedAt(room.id())?.let { dict["createdAt"] = it }
+                }
+                result.add(dict)
+            } catch (e: Exception) {
+                android.util.Log.w("CapMatrix", "getRooms: skipping ${room.id()}: ${e.message}")
             }
-            result.add(dict)
         }
         return result
     }
