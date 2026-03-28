@@ -126,6 +126,8 @@ class MatrixSDKBridge(private val context: Context) {
 
         val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_.-]"), "_")
         val dataDir = context.filesDir.resolve("matrix_sdk/$safeUserId")
+        // mkdirs (not deleteRecursively) preserves the existing SQLite store so the
+        // Rust SDK resumes from the cached sync position rather than a full re-sync.
         dataDir.mkdirs()
         val dataDirPath = dataDir.absolutePath
 

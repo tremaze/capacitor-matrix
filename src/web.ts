@@ -2,6 +2,7 @@ import { WebPlugin } from '@capacitor/core';
 import { initAsync as initCryptoWasm } from '@matrix-org/matrix-sdk-crypto-wasm';
 import {
   createClient,
+  IndexedDBStore,
   ClientEvent,
   RoomEvent,
   RoomMemberEvent,
@@ -43,6 +44,7 @@ const SESSION_KEY = 'matrix_session';
 
 export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   private client?: MatrixClient;
+  private syncStore?: IndexedDBStore;
   private secretStorageKey?: Uint8Array<ArrayBuffer>;
   private secretStorageKeyId?: string;   // key ID the cached bytes belong to
   private recoveryPassphrase?: string;
@@ -114,11 +116,26 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     },
   };
 
+  private async createSyncStore(userId: string, fresh: boolean): Promise<IndexedDBStore> {
+    if (typeof indexedDB === 'undefined') throw new Error('indexedDB not available');
+    const dbName = `matrix-sync-${userId}`;
+    if (fresh) {
+      await new Promise<void>((resolve) => {
+        const req = indexedDB.deleteDatabase(dbName);
+        req.onsuccess = req.onerror = req.onblocked = () => resolve();
+      });
+    }
+    return new IndexedDBStore({ indexedDB: window.indexedDB, dbName });
+  }
+
   // ── Auth ──────────────────────────────────────────────
 
   async login(options: LoginOptions): Promise<SessionInfo> {
     const tmpClient = createClient({ baseUrl: options.homeserverUrl });
     const res = await tmpClient.loginWithPassword(options.userId, options.password);
+
+    let store: IndexedDBStore | undefined;
+    try { store = await this.createSyncStore(res.user_id, /* fresh */ true); } catch { }
 
     this.client = createClient({
       baseUrl: options.homeserverUrl,
@@ -128,7 +145,10 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       cryptoCallbacks: this._cryptoCallbacks,
       refreshToken: 'jwt-placeholder',
       tokenRefreshFunction: this.createTokenRefreshFunction(),
+      ...(store && { store }),
     });
+
+    if (store) { await store.startup(); this.syncStore = store; }
 
     const session: SessionInfo = {
       accessToken: res.access_token,
@@ -149,6 +169,9 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       this.client = undefined;
     }
 
+    let store: IndexedDBStore | undefined;
+    try { store = await this.createSyncStore(options.userId, /* fresh */ false); } catch { }
+
     this.client = createClient({
       baseUrl: options.homeserverUrl,
       accessToken: options.accessToken,
@@ -157,7 +180,10 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       cryptoCallbacks: this._cryptoCallbacks,
       refreshToken: 'jwt-placeholder',
       tokenRefreshFunction: this.createTokenRefreshFunction(),
+      ...(store && { store }),
     });
+
+    if (store) { await store.startup(); this.syncStore = store; }
 
     const session: SessionInfo = {
       accessToken: options.accessToken,
@@ -180,6 +206,10 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       }
       this.client = undefined;
     }
+    if (this.syncStore) {
+      try { await this.syncStore.deleteAllData(); } catch { }
+      this.syncStore = undefined;
+    }
     localStorage.removeItem(SESSION_KEY);
   }
 
@@ -198,6 +228,10 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     localStorage.removeItem(SESSION_KEY);
 
     await this.deleteCryptoStore();
+    if (this.syncStore) {
+      try { await this.syncStore.deleteAllData(); } catch { }
+      this.syncStore = undefined;
+    }
   }
 
   async getSession(): Promise<SessionInfo | null> {
@@ -327,6 +361,18 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         roomId: room.roomId,
         summary: this.serializeRoom(room),
       });
+    });
+
+    // When the local user leaves or is banned, remove that room from the sync
+    // store immediately so it isn't included in the next IndexedDB flush.
+    // Without this, the flush can write a stale "joined" entry alongside an
+    // already-advanced sync token; on reload, incremental sync never re-delivers
+    // the leave event and the room reappears.
+    this.client!.on(RoomMemberEvent.Membership, (_event: SdkMatrixEvent, member: any) => {
+      const myUserId = this.client?.getUserId();
+      if (member.userId === myUserId && (member.membership === 'leave' || member.membership === 'ban')) {
+        this.syncStore?.removeRoom(member.roomId);
+      }
     });
 
     this.client!.on(RoomMemberEvent.Typing, (_event: SdkMatrixEvent, member: any) => {

@@ -57,7 +57,7 @@ class MatrixSDKBridge {
 
     private func _login(homeserverUrl: String, userId: String, password: String) async throws -> [String: String] {
         let dataDir = Self.dataDirectory()
-        let cacheDir = Self.cacheDirectory()
+        let cacheDir = Self.cacheDirectory(clearFirst: true)
 
         let newClient = try await ClientBuilder()
             .homeserverUrl(url: homeserverUrl)
@@ -1571,13 +1571,14 @@ class MatrixSDKBridge {
     }
 
     /// Separate cache directory for sliding sync state.
-    /// Cleared on each login/restore to force a fresh sync, working around
-    /// Tuwunel returning stale events when resuming from a cached sync position.
-    private static func cacheDirectory() -> String {
+    /// Pass `clearFirst: true` on fresh logins to wipe any stale sync state.
+    /// Session restores preserve the cache so the Rust SDK can resume incrementally.
+    private static func cacheDirectory(clearFirst: Bool = false) -> String {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("matrix_sdk_cache")
-        // Clear stale sync cache on each startup
-        try? FileManager.default.removeItem(at: dir)
+        if clearFirst {
+            try? FileManager.default.removeItem(at: dir)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.path
     }
