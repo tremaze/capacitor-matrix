@@ -45,6 +45,8 @@ import uniffi.matrix_sdk_base.EncryptionState
 import org.matrix.rustcomponents.sdk.messageEventContentFromMarkdown
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -80,6 +82,7 @@ class MatrixSDKBridge(private val context: Context) {
         mutableMapOf<String, MutableMap<String, MutableSet<String>>>()
     )
 
+    private val loginMutex = Mutex()
     private val sessionStore by lazy { MatrixSessionStore(context) }
     // Set on session restore (loginWithToken) to reconcile stale cached rooms.
     // Tuwunel's sliding sync does not push leave events on resume, so rooms left on
@@ -120,8 +123,9 @@ class MatrixSDKBridge(private val context: Context) {
         accessToken: String,
         userId: String,
         deviceId: String,
-    ): SessionInfo {
-        // Stop existing sync and clean up stale references before replacing the client
+    ): SessionInfo = loginMutex.withLock {
+        // Stop existing sync and clean up stale references before replacing the client.
+        // Serialized by loginMutex so concurrent calls don't race on shared state.
         syncService?.stop()
         syncService = null
         receiptSyncJob?.cancel()
@@ -170,7 +174,7 @@ class MatrixSDKBridge(private val context: Context) {
             homeserverUrl = homeserverUrl,
         )
         sessionStore.save(info)
-        return info
+        info
     }
 
     suspend fun logout() {
@@ -263,6 +267,7 @@ class MatrixSDKBridge(private val context: Context) {
         onMessage: (Map<String, Any?>) -> Unit,
         onRoomUpdate: (String, Map<String, Any?>) -> Unit,
         onReceipt: (roomId: String, eventId: String, userId: String) -> Unit,
+        onTyping: (roomId: String, userIds: List<String>) -> Unit,
     ) {
         val c = requireClient()
         val service = c.syncService().finish()
@@ -275,7 +280,7 @@ class MatrixSDKBridge(private val context: Context) {
                 // When sync reaches SYNCING, subscribe to room timelines
                 if (mapped == "SYNCING") {
                     scope.launch {
-                        subscribeToRoomTimelines(c, onMessage, onRoomUpdate)
+                        subscribeToRoomTimelines(c, onMessage, onRoomUpdate, onTyping)
                     }
                 }
             }
@@ -285,7 +290,7 @@ class MatrixSDKBridge(private val context: Context) {
         // ephemeral events. Sliding sync doesn't deliver other users'
         // read receipts, so this provides live receipt updates.
         android.util.Log.d("CapMatrix", "startSync: launching receiptSync before service.start()")
-        startReceiptSync(onReceipt)
+        startReceiptSync(onReceipt, onTyping, onMessage)
 
         // service.start() blocks until sync stops, so it must be last
         android.util.Log.d("CapMatrix", "startSync: calling service.start() (blocking)")
@@ -296,6 +301,7 @@ class MatrixSDKBridge(private val context: Context) {
         c: Client,
         onMessage: (Map<String, Any?>) -> Unit,
         onRoomUpdate: (String, Map<String, Any?>) -> Unit,
+        onTyping: (roomId: String, userIds: List<String>) -> Unit,
     ) {
         for (room in c.rooms()) {
             val roomId = room.id()
@@ -323,46 +329,95 @@ class MatrixSDKBridge(private val context: Context) {
                     override fun onUpdate(diff: List<TimelineDiff>) {
                         // Suppress live events while getRoomMessages is paginating this room
                         if (paginatingRooms.contains(roomId)) return
+                        val room8 = roomId.takeLast(8)
+                        android.util.Log.d("CapMatrix/Order", "onUpdate room=...$room8 diffs=${diff.size}")
+                        // Collect messages for the whole batch before emitting so we can sort
+                        // chronologically. A single onUpdate may contain both an Insert/Set for a
+                        // confirmed local echo and Set diffs for received messages at lower indices,
+                        // arriving in SDK index order rather than originServerTs order.
+                        val pendingMessages = mutableListOf<Map<String, Any?>>()
                         try {
                             for (d in diff) {
                                 when (d) {
                                     is TimelineDiff.PushBack -> {
-                                        // Skip local echoes — the Set diff will follow with the real EventId
-                                        val isLocalEcho = d.value.asEvent()?.eventOrTransactionId is EventOrTransactionId.TransactionId
+                                        val ev = d.value.asEvent()
+                                        val isLocalEcho = ev?.eventOrTransactionId is EventOrTransactionId.TransactionId
+                                        val eid = when (val id = ev?.eventOrTransactionId) {
+                                            is EventOrTransactionId.EventId -> "...${id.eventId.takeLast(8)}"
+                                            is EventOrTransactionId.TransactionId -> "txn:${id.transactionId.takeLast(8)}"
+                                            else -> "?"
+                                        }
+                                        android.util.Log.d("CapMatrix/Order", "  PushBack id=$eid ts=${ev?.timestamp} local=$isLocalEcho")
                                         if (!isLocalEcho) {
-                                            serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
+                                            serializeTimelineItem(d.value, roomId)?.let {
+                                                android.util.Log.d("CapMatrix/Order", "  -> collect PushBack id=$eid ts=${it["originServerTs"]}")
+                                                pendingMessages.add(it)
+                                            }
                                         }
                                         emitRoomUpdate()
                                     }
                                     is TimelineDiff.Append -> {
+                                        android.util.Log.d("CapMatrix/Order", "  Append count=${d.values.size}")
                                         d.values.forEach { item ->
-                                            serializeTimelineItem(item, roomId)?.let { onMessage(it) }
+                                            serializeTimelineItem(item, roomId)?.let { pendingMessages.add(it) }
                                         }
                                         emitRoomUpdate()
                                     }
                                     is TimelineDiff.Set -> {
-                                        serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
+                                        val ev = d.value.asEvent()
+                                        val eid = when (val id = ev?.eventOrTransactionId) {
+                                            is EventOrTransactionId.EventId -> "...${id.eventId.takeLast(8)}"
+                                            is EventOrTransactionId.TransactionId -> "txn:${id.transactionId.takeLast(8)}"
+                                            else -> "?"
+                                        }
+                                        android.util.Log.d("CapMatrix/Order", "  Set[${d.index}] id=$eid ts=${ev?.timestamp}")
+                                        serializeTimelineItem(d.value, roomId)?.let {
+                                            android.util.Log.d("CapMatrix/Order", "  -> collect Set id=$eid ts=${it["originServerTs"]}")
+                                            pendingMessages.add(it)
+                                        }
                                     }
                                     is TimelineDiff.Reset -> {
+                                        android.util.Log.d("CapMatrix/Order", "  Reset count=${d.values.size}")
                                         d.values.forEach { item ->
-                                            serializeTimelineItem(item, roomId)?.let { onMessage(it) }
+                                            serializeTimelineItem(item, roomId)?.let { pendingMessages.add(it) }
                                         }
                                         emitRoomUpdate()
                                     }
                                     is TimelineDiff.Insert -> {
-                                        serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
+                                        val ev = d.value.asEvent()
+                                        val eid = when (val id = ev?.eventOrTransactionId) {
+                                            is EventOrTransactionId.EventId -> "...${id.eventId.takeLast(8)}"
+                                            is EventOrTransactionId.TransactionId -> "txn:${id.transactionId.takeLast(8)}"
+                                            else -> "?"
+                                        }
+                                        android.util.Log.d("CapMatrix/Order", "  Insert[${d.index}] id=$eid ts=${ev?.timestamp}")
+                                        serializeTimelineItem(d.value, roomId)?.let {
+                                            android.util.Log.d("CapMatrix/Order", "  -> collect Insert id=$eid ts=${it["originServerTs"]}")
+                                            pendingMessages.add(it)
+                                        }
                                         emitRoomUpdate()
                                     }
                                     is TimelineDiff.PushFront -> {
-                                        serializeTimelineItem(d.value, roomId)?.let { onMessage(it) }
+                                        android.util.Log.d("CapMatrix/Order", "  PushFront")
+                                        serializeTimelineItem(d.value, roomId)?.let { pendingMessages.add(it) }
                                         emitRoomUpdate()
                                     }
-                                    else -> { /* Remove, Clear, Truncate, PopBack, PopFront — no JS event needed */ }
+                                    else -> {
+                                        android.util.Log.d("CapMatrix/Order", "  ${d::class.simpleName} (no emit)")
+                                    }
                                 }
                             }
                         } catch (e: Exception) {
-                            android.util.Log.e("CapMatrix", "Error in timeline listener for $roomId: ${e.message}", e)
+                            android.util.Log.e("CapMatrix", "Error processing timeline diff for $roomId: ${e.message}", e)
                         }
+                        // Sort and emit outside the try-catch so messages collected before any
+                        // exception are still delivered to JS.
+                        pendingMessages.sortWith(compareBy {
+                            val ts = (it["originServerTs"] as? Long) ?: 0L
+                            if (ts == 0L) Long.MAX_VALUE else ts
+                        })
+                        android.util.Log.d("CapMatrix/Order", "  emit ${pendingMessages.size} messages sorted")
+                        pendingMessages.forEach { onMessage(it) }
                     }
                 })
                 timelineListenerHandles.add(handle)
@@ -595,9 +650,10 @@ class MatrixSDKBridge(private val context: Context) {
             // Paginate when: first load with too few items, OR explicit pagination request
             if (isPagination || countBefore < requestedLimit) {
                 hitStart = timeline.paginateBackwards(requestedLimit.toUShort())
-                if (!hitStart) {
-                    collector.waitForUpdate(timeoutMs = 5000)
-                }
+                // Always wait — even when hitStart=true, the final batch's
+                // events arrive asynchronously via PushFront/Insert diffs
+                collector.waitForUpdate(timeoutMs = 5000)
+                android.util.Log.d("CapMatrix", "getRoomMessages: after paginateBackwards hitStart=$hitStart countBefore=$countBefore countAfter=${collector.events.size}")
             }
         } finally {
             handle.cancel()
@@ -606,6 +662,12 @@ class MatrixSDKBridge(private val context: Context) {
 
         val allEvents = collector.events
         val cursorId = oldestReturnedEventId[roomId]
+
+        val room8 = roomId.takeLast(8)
+        android.util.Log.d("CapMatrix/Order", "getRoomMessages room=...$room8 allEvents=${allEvents.size} limit=$requestedLimit isPagination=$isPagination cursor=$cursorId")
+        allEvents.takeLast(5).forEachIndexed { i, ev ->
+            android.util.Log.d("CapMatrix/Order", "  allEvents[${allEvents.size - 5 + i}] id=...${(ev["eventId"] as? String)?.takeLast(8)} ts=${ev["originServerTs"]} sender=...${(ev["senderId"] as? String)?.takeLast(12)}")
+        }
 
         var events = if (isPagination && cursorId != null) {
             // Pagination: find the cursor event and return events before it
@@ -618,6 +680,25 @@ class MatrixSDKBridge(private val context: Context) {
         } else {
             // Initial load: return newest events
             allEvents.takeLast(requestedLimit).map { it.toMutableMap() }
+        }
+
+        android.util.Log.d("CapMatrix/Order", "  pre-sort slice (${events.size} events):")
+        events.forEachIndexed { i, ev ->
+            android.util.Log.d("CapMatrix/Order", "    [$i] id=...${(ev["eventId"] as? String)?.takeLast(8)} ts=${ev["originServerTs"]} sender=...${(ev["senderId"] as? String)?.takeLast(12)}")
+        }
+
+        // Sort chronologically by originServerTs. The Rust SDK places local echoes at
+        // the index where they were created, so a received message that arrived after the
+        // local echo may end up at a higher index even when it has an earlier timestamp.
+        // Local echoes (originServerTs == 0) are pinned to the end.
+        events = events.sortedWith(compareBy {
+            val ts = (it["originServerTs"] as? Long) ?: 0L
+            if (ts == 0L) Long.MAX_VALUE else ts
+        })
+
+        android.util.Log.d("CapMatrix/Order", "  post-sort slice (${events.size} events):")
+        events.forEachIndexed { i, ev ->
+            android.util.Log.d("CapMatrix/Order", "    [$i] id=...${(ev["eventId"] as? String)?.takeLast(8)} ts=${ev["originServerTs"]} sender=...${(ev["senderId"] as? String)?.takeLast(12)}")
         }
 
         // Update cursor to the oldest event we're returning
@@ -1688,7 +1769,11 @@ class MatrixSDKBridge(private val context: Context) {
 
     // ── Receipt Sync (parallel v2 sync for read receipts) ──────
 
-    private fun startReceiptSync(onReceipt: (roomId: String, eventId: String, userId: String) -> Unit) {
+    private fun startReceiptSync(
+        onReceipt: (roomId: String, eventId: String, userId: String) -> Unit,
+        onTyping: (roomId: String, userIds: List<String>) -> Unit,
+        onMessage: (Map<String, Any?>) -> Unit,
+    ) {
         val session = sessionStore.load()
         if (session == null) {
             android.util.Log.e("CapMatrix", "receiptSync: NO SESSION FOUND, cannot start receipt sync")
@@ -1728,7 +1813,7 @@ class MatrixSDKBridge(private val context: Context) {
                             workingPath = apiPath
                             val json = org.json.JSONObject(body)
                             since = json.optString("next_batch", null)
-                            processReceiptResponse(body, onReceipt)
+                            processReceiptResponse(body, onReceipt, onTyping, onMessage)
                             android.util.Log.d("CapMatrix", "receiptSync: $apiPath works, since=$since")
                             break
                         } else {
@@ -1771,7 +1856,7 @@ class MatrixSDKBridge(private val context: Context) {
                         val body = conn.inputStream.bufferedReader().readText()
                         val json = org.json.JSONObject(body)
                         json.optString("next_batch", null)?.let { since = it }
-                        processReceiptResponse(body, onReceipt)
+                        processReceiptResponse(body, onReceipt, onTyping, onMessage)
                     } finally {
                         conn.disconnect()
                     }
@@ -1798,7 +1883,7 @@ class MatrixSDKBridge(private val context: Context) {
                 readTimeout = 15_000
                 doOutput = true
             }
-            val filterJson = """{"room":{"timeline":{"limit":0},"state":{"types":[]},"ephemeral":{"types":["m.receipt"]}},"presence":{"types":[]}}"""
+            val filterJson = """{"room":{"timeline":{"limit":0},"state":{"types":[]},"ephemeral":{"types":["m.receipt","m.typing"]}},"presence":{"types":[]}}"""
             conn.outputStream.use { OutputStreamWriter(it).apply { write(filterJson); flush() } }
             val code = conn.responseCode
             if (code == 200) {
@@ -1821,7 +1906,7 @@ class MatrixSDKBridge(private val context: Context) {
         if (filterId != null) {
             sb.append("&filter=").append(URLEncoder.encode(filterId, "UTF-8"))
         } else {
-            val inlineFilter = """{"room":{"timeline":{"limit":0},"state":{"types":[]},"ephemeral":{"types":["m.receipt"]}},"presence":{"types":[]}}"""
+            val inlineFilter = """{"room":{"timeline":{"limit":0},"state":{"types":[]},"ephemeral":{"types":["m.receipt","m.typing"]}},"presence":{"types":[]}}"""
             sb.append("&filter=").append(URLEncoder.encode(inlineFilter, "UTF-8"))
         }
         if (since != null) {
@@ -1830,7 +1915,12 @@ class MatrixSDKBridge(private val context: Context) {
         return sb.toString()
     }
 
-    private fun processReceiptResponse(body: String, onReceipt: (roomId: String, eventId: String, userId: String) -> Unit) {
+    private fun processReceiptResponse(
+        body: String,
+        onReceipt: (roomId: String, eventId: String, userId: String) -> Unit,
+        onTyping: (roomId: String, userIds: List<String>) -> Unit,
+        onMessage: (Map<String, Any?>) -> Unit,
+    ) {
         try {
             val json = org.json.JSONObject(body)
             val join = json.optJSONObject("rooms")?.optJSONObject("join") ?: return
@@ -1841,24 +1931,54 @@ class MatrixSDKBridge(private val context: Context) {
                 val events = ephemeral.optJSONArray("events") ?: continue
                 for (i in 0 until events.length()) {
                     val event = events.optJSONObject(i) ?: continue
-                    if (event.optString("type") != "m.receipt") continue
-                    // Content format: { "$eventId": { "m.read": { "@user:server": { "ts": 123 } } } }
-                    val content = event.optJSONObject("content") ?: continue
-                    val roomReceipts = receiptCache.getOrPut(roomId) { mutableMapOf() }
-                    for (eventId in content.keys()) {
-                        val receiptTypes = content.optJSONObject(eventId) ?: continue
-                        // Check both m.read and m.read.private
-                        for (rType in listOf("m.read", "m.read.private")) {
-                            val readers = receiptTypes.optJSONObject(rType) ?: continue
-                            for (userId in readers.keys()) {
-                                // Cache receipts from others for watermark logic
-                                if (userId != myUserId) {
-                                    roomReceipts.getOrPut(eventId) { mutableSetOf() }.add(userId)
+                    when (event.optString("type")) {
+                        "m.typing" -> {
+                            val userIds = event.optJSONObject("content")
+                                ?.optJSONArray("user_ids")
+                                ?: continue
+                            val typingUsers = mutableListOf<String>()
+                            for (j in 0 until userIds.length()) {
+                                userIds.optString(j)?.let { typingUsers.add(it) }
+                            }
+                            android.util.Log.d("CapMatrix", "receiptSync: typing roomId=$roomId users=$typingUsers")
+                            onTyping(roomId, typingUsers)
+                        }
+                        "m.receipt" -> {
+                            // Content format: { "$eventId": { "m.read": { "@user:server": { "ts": 123 } } } }
+                            val content = event.optJSONObject("content") ?: continue
+                            val roomReceipts = receiptCache.getOrPut(roomId) { mutableMapOf() }
+                            for (eventId in content.keys()) {
+                                val receiptTypes = content.optJSONObject(eventId) ?: continue
+                                // Check both m.read and m.read.private
+                                for (rType in listOf("m.read", "m.read.private")) {
+                                    val readers = receiptTypes.optJSONObject(rType) ?: continue
+                                    for (userId in readers.keys()) {
+                                        // Cache receipts from others for watermark logic
+                                        if (userId != myUserId) {
+                                            roomReceipts.getOrPut(eventId) { mutableSetOf() }.add(userId)
+                                        }
+                                        android.util.Log.d("CapMatrix", "receiptSync: receipt roomId=$roomId eventId=$eventId userId=$userId")
+                                        onReceipt(roomId, eventId, userId)
+                                    }
                                 }
-                                android.util.Log.d("CapMatrix", "receiptSync: receipt roomId=$roomId eventId=$eventId userId=$userId")
-                                onReceipt(roomId, eventId, userId)
+                                // Emit a lightweight readBy update from cache — no Rust SDK call needed.
+                                val allReaders = roomReceipts[eventId]?.toList()
+                                if (!allReaders.isNullOrEmpty()) {
+                                    onMessage(
+                                        mapOf(
+                                            "eventId" to eventId,
+                                            "roomId" to roomId,
+                                            "readBy" to allReaders,
+                                            "status" to "read",
+                                            // JS event handlers expect type and content to be present
+                                            "type" to "m.room.message",
+                                            "content" to emptyMap<String, Any?>(),
+                                        )
+                                    )
+                                }
                             }
                         }
+                        else -> {}
                     }
                 }
             }

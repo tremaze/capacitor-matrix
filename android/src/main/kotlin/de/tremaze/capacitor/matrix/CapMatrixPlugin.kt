@@ -132,6 +132,14 @@ class MatrixPlugin : Plugin() {
                             JSObject().put("roomId", roomId).put("eventId", eventId).put("userId", userId),
                         )
                     },
+                    onTyping = { roomId, userIds ->
+                        val jsUserIds = com.getcapacitor.JSArray()
+                        userIds.forEach { jsUserIds.put(it) }
+                        notifyListeners(
+                            "typingChanged",
+                            JSObject().put("roomId", roomId).put("userIds", jsUserIds),
+                        )
+                    },
                 )
                 call.resolve()
             } catch (e: Exception) {
