@@ -817,13 +817,12 @@ class MatrixSDKBridge {
                 let tPagDone = CFAbsoluteTimeGetCurrent()
                 print("[CapMatrix] [PERF] paginateBackwards=\(ms(tPag,tPagDone))ms hitStart=\(hitStart)")
 
-                // If there were new events, wait for the diffs to arrive via the listener
-                if !hitStart {
-                    let tWait2 = CFAbsoluteTimeGetCurrent()
-                    _ = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
-                    let tWait2Done = CFAbsoluteTimeGetCurrent()
-                    print("[CapMatrix] [PERF] waitForPagination=\(ms(tWait2,tWait2Done))ms items=\(collector.events.count)")
-                }
+                // Always wait for diffs — even when hitStart=true, the final batch's
+                // events arrive asynchronously via PushFront/Insert diffs
+                let tWait2 = CFAbsoluteTimeGetCurrent()
+                _ = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+                let tWait2Done = CFAbsoluteTimeGetCurrent()
+                print("[CapMatrix] [PERF] waitForPagination=\(ms(tWait2,tWait2Done))ms items=\(collector.events.count) hitStart=\(hitStart)")
             }
         } catch {
             handle.cancel()
