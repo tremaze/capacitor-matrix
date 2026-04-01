@@ -32,6 +32,7 @@ class MatrixSDKBridge {
     private var syncStateObserver: SyncStateObserverProxy?
     private let subscriptionLock = NSLock()
     private var receiptSyncTask: Task<Void, Never>?
+    private var currentSyncState: String = "STOPPED"
     private var roomCreatedAtCache: [String: UInt64] = [:]
     private let createdAtLock = NSLock()
     // Rooms currently being paginated by getRoomMessages — live listener suppresses events for these
@@ -54,7 +55,7 @@ class MatrixSDKBridge {
         } catch {
             if "\(error)".contains("account in the store") {
                 print("[CapMatrix] Crypto store mismatch — clearing data and retrying login")
-                clearAllData()
+                await clearAllData()
                 return try await _login(homeserverUrl: homeserverUrl, userId: userId, password: password)
             }
             throw error
@@ -98,7 +99,7 @@ class MatrixSDKBridge {
             // If crypto store has mismatched account, wipe and retry
             if "\(error)".contains("account in the store") {
                 print("[CapMatrix] Crypto store mismatch — clearing data and retrying login")
-                clearAllData()
+                await clearAllData()
                 return try await _loginWithToken(homeserverUrl: homeserverUrl, accessToken: accessToken, userId: userId, deviceId: deviceId)
             }
             throw error
@@ -164,6 +165,7 @@ class MatrixSDKBridge {
         await syncService?.stop()
         syncService = nil
         syncStateHandle = nil
+        currentSyncState = "STOPPED"
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
         subscribedRoomIds.removeAll()
@@ -174,9 +176,13 @@ class MatrixSDKBridge {
         sessionStore.clear()
     }
 
-    func clearAllData() {
+    func clearAllData() async {
+        receiptSyncTask?.cancel()
+        receiptSyncTask = nil
+        await syncService?.stop()
         syncService = nil
         syncStateHandle = nil
+        currentSyncState = "STOPPED"
         client = nil
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
@@ -282,6 +288,7 @@ class MatrixSDKBridge {
 
         let observer = SyncStateObserverProxy(onUpdate: { [weak self] state in
             let mapped = Self.mapSyncState(state)
+            self?.currentSyncState = mapped
             print("[CapMatrix] SyncState changed: \(state) -> \(mapped)")
             onSyncState(mapped)
             if mapped == "SYNCING" {
@@ -595,6 +602,7 @@ class MatrixSDKBridge {
     func stopSync() async throws {
         await syncService?.stop()
         syncStateHandle = nil
+        currentSyncState = "STOPPED"
         subscribedRoomIds.removeAll()
         timelineListenerHandles.removeAll()
         roomTimelines.removeAll()
@@ -603,7 +611,7 @@ class MatrixSDKBridge {
     }
 
     func getSyncState() -> String {
-        return "SYNCING"
+        return currentSyncState
     }
 
     // MARK: - Room Lookup
@@ -794,24 +802,24 @@ class MatrixSDKBridge {
         print("[CapMatrix] [PERF] addListener=\(ms(t3,t4))ms")
 
         var hitStart = false
-        do {
-            // Wait for the initial Reset snapshot before paginating
-            let tWait1 = CFAbsoluteTimeGetCurrent()
-            let gotInitial = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
-            let tWait1Done = CFAbsoluteTimeGetCurrent()
-            let countBefore = collector.events.count
-            let isPagination = from != nil
-            print("[CapMatrix] [PERF] waitForInitial=\(ms(tWait1,tWait1Done))ms gotInitial=\(gotInitial) items=\(countBefore) from=\(from ?? "nil")")
+        // Wait for the initial Reset snapshot before paginating
+        let tWait1 = CFAbsoluteTimeGetCurrent()
+        let gotInitial = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
+        let tWait1Done = CFAbsoluteTimeGetCurrent()
+        let countBefore = collector.events.count
+        let isPagination = from != nil
+        print("[CapMatrix] [PERF] waitForInitial=\(ms(tWait1,tWait1Done))ms gotInitial=\(gotInitial) items=\(countBefore) from=\(from ?? "nil")")
 
-            // Reset cursor on initial load
-            if !isPagination {
-                paginatingLock.lock()
-                oldestReturnedEventId.removeValue(forKey: roomId)
-                paginatingLock.unlock()
-            }
+        // Reset cursor on initial load
+        if !isPagination {
+            paginatingLock.lock()
+            oldestReturnedEventId.removeValue(forKey: roomId)
+            paginatingLock.unlock()
+        }
 
-            // Paginate when: first load with too few items, OR explicit pagination request
-            if isPagination || countBefore < limit {
+        // Paginate when: first load with too few items, OR explicit pagination request
+        if isPagination || countBefore < limit {
+            do {
                 let tPag = CFAbsoluteTimeGetCurrent()
                 hitStart = try await timeline.paginateBackwards(numEvents: UInt16(limit))
                 let tPagDone = CFAbsoluteTimeGetCurrent()
@@ -823,13 +831,12 @@ class MatrixSDKBridge {
                 _ = await collector.waitForUpdate(timeoutNanos: 5_000_000_000)
                 let tWait2Done = CFAbsoluteTimeGetCurrent()
                 print("[CapMatrix] [PERF] waitForPagination=\(ms(tWait2,tWait2Done))ms items=\(collector.events.count) hitStart=\(hitStart)")
+            } catch {
+                // Pagination failed (e.g. expired token) — fall through and
+                // return whatever events were already collected from cache.
+                print("[CapMatrix] getRoomMessages: paginateBackwards failed, returning cached events: \(error)")
+                hitStart = true
             }
-        } catch {
-            handle.cancel()
-            paginatingLock.lock()
-            paginatingRooms.remove(roomId)
-            paginatingLock.unlock()
-            throw error
         }
 
         handle.cancel()

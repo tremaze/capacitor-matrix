@@ -115,8 +115,10 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func clearAllData(_ call: CAPPluginCall) {
-        matrixBridge.clearAllData()
-        call.resolve()
+        Task {
+            await matrixBridge.clearAllData()
+            call.resolve()
+        }
     }
 
     @objc func updateAccessToken(_ call: CAPPluginCall) {
@@ -670,7 +672,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         do {
             let httpUrl = try matrixBridge.getMediaUrl(mxcUrl: mxcUrl)
-            call.resolve(["url": httpUrl])
+            call.resolve(["httpUrl": httpUrl])
         } catch {
             call.reject(error.localizedDescription)
         }
@@ -802,7 +804,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
 
         do {
             let url = try matrixBridge.getThumbnailUrl(mxcUrl: mxcUrl, width: width, height: height, method: method)
-            call.resolve(["url": url])
+            call.resolve(["httpUrl": url])
         } catch {
             call.reject(error.localizedDescription)
         }
