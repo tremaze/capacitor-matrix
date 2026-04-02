@@ -1864,7 +1864,7 @@ class CapMatrix(private val context: Context) {
                 "membership" to membership,
                 "avatarUrl" to null,
                 "isDirect" to isDirect,
-                "roomOrderTs" to (lastEventTs ?: 0L),
+                "roomOrderTs" to lastEventTs,
             )
             if (latestEventDict != null) {
                 dict["latestEvent"] = latestEventDict
