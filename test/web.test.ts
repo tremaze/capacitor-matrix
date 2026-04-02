@@ -171,14 +171,13 @@ describe('jwtLogin', () => {
     expect(result.userId).toBe('@test:localhost');
   });
 
-  it('persists session to localStorage', async () => {
+  it('does NOT persist session to localStorage (web security)', async () => {
     await plugin.jwtLogin({
       homeserverUrl: 'https://matrix.test',
       token: 'my-jwt',
     });
 
-    const stored = JSON.parse(localStorage.getItem('matrix_session')!);
-    expect(stored.accessToken).toBe('mock-token');
+    expect(localStorage.getItem('matrix_session')).toBeNull();
   });
 });
 

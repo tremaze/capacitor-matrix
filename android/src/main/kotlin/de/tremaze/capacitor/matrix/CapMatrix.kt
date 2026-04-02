@@ -147,13 +147,39 @@ class CapMatrix(private val context: Context) {
         }.also { Log.d(TAG, "jwtLogin: complete, returning session for ${it["userId"]}") }
     }
 
+    private fun decodeJwtSub(token: String): String? {
+        val parts = token.split(".")
+        if (parts.size < 2) return null
+        return try {
+            val payload = android.util.Base64.decode(parts[1], android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING)
+            JSONObject(String(payload, Charsets.UTF_8)).optString("sub", null)
+        } catch (_: Exception) { null }
+    }
+
     private suspend fun _jwtLogin(
         homeserverUrl: String,
         token: String
     ): Map<String, String> {
-        val existingDeviceId = sessionStore.load()?.deviceId
-        Log.d(TAG, "_jwtLogin: exchanging JWT for credentials… existingDeviceId=$existingDeviceId")
-        val creds = exchangeJwtForCredentials(homeserverUrl, token, existingDeviceId)
+        val sub = decodeJwtSub(token)
+        val stored = sessionStore.load()
+        Log.d(TAG, "_jwtLogin: sub=$sub, stored userId=${stored?.userId}, stored hs=${stored?.homeserverUrl}")
+
+        if (stored != null && sub != null) {
+            val storedUser = stored.userId  // e.g. @sub:server
+            val matchesUser = storedUser.startsWith("@$sub:")
+            val matchesHomeserver = stored.homeserverUrl.trimEnd('/') == homeserverUrl.trimEnd('/')
+
+            if (matchesUser && matchesHomeserver) {
+                Log.d(TAG, "_jwtLogin: same user + homeserver — restoring from stored session")
+                return _restoreWithCredentials(homeserverUrl, stored.accessToken, stored.userId, stored.deviceId)
+            } else {
+                Log.w(TAG, "_jwtLogin: different user — clearing all data before fresh exchange")
+                clearAllData()
+            }
+        }
+
+        Log.d(TAG, "_jwtLogin: performing fresh JWT exchange (no deviceId)")
+        val creds = exchangeJwtForCredentials(homeserverUrl, token)
         Log.d(TAG, "_jwtLogin: got credentials userId=${creds.userId} deviceId=${creds.deviceId}")
         return _restoreWithCredentials(homeserverUrl, creds.accessToken, creds.userId, creds.deviceId)
     }

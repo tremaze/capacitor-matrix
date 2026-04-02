@@ -112,8 +112,47 @@ class MatrixSDKBridge {
         let deviceId: String
     }
 
+    private func decodeJwtSub(_ token: String) -> String? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder > 0 { base64.append(contentsOf: String(repeating: "=", count: 4 - remainder)) }
+        guard let data = Data(base64Encoded: base64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sub = json["sub"] as? String else { return nil }
+        return sub
+    }
+
     private func _jwtLogin(homeserverUrl: String, token: String) async throws -> [String: String] {
+        let sub = decodeJwtSub(token)
+        let stored = sessionStore.load()
+        print("[CapMatrix] _jwtLogin: sub=\(sub ?? "nil"), stored userId=\(stored?.userId ?? "nil"), stored hs=\(stored?.homeserverUrl ?? "nil")")
+
+        if let stored = stored, let sub = sub {
+            let matchesUser = stored.userId.hasPrefix("@\(sub):")
+            let matchesHomeserver = stored.homeserverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ==
+                homeserverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+            if matchesUser && matchesHomeserver {
+                print("[CapMatrix] _jwtLogin: same user + homeserver — restoring from stored session")
+                return try await _restoreWithCredentials(
+                    homeserverUrl: homeserverUrl,
+                    accessToken: stored.accessToken,
+                    userId: stored.userId,
+                    deviceId: stored.deviceId
+                )
+            } else {
+                print("[CapMatrix] _jwtLogin: different user — clearing all data before fresh exchange")
+                await clearAllData()
+            }
+        }
+
+        print("[CapMatrix] _jwtLogin: performing fresh JWT exchange (no deviceId)")
         let creds = try await exchangeJwtForCredentials(homeserverUrl: homeserverUrl, token: token)
+        print("[CapMatrix] _jwtLogin: got credentials userId=\(creds.userId) deviceId=\(creds.deviceId)")
         return try await _restoreWithCredentials(
             homeserverUrl: homeserverUrl,
             accessToken: creds.accessToken,

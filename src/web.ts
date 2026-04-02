@@ -163,20 +163,24 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async jwtLogin(options: JwtLoginOptions): Promise<SessionInfo> {
     console.debug('[CapMatrix] jwtLogin: starting, hasExistingClient=' + !!this.client);
+    // Capture the existing deviceId before stopping — reuse it in the login
+    // request so the server returns the same device (preserving crypto store).
+    const existingDeviceId = this.client?.getDeviceId() ?? undefined;
     // Stop any previously running client to avoid parallel instances that
     // would deadlock on the shared IndexedDB crypto store.
     if (this.client) {
-      console.debug('[CapMatrix] jwtLogin: stopping existing client');
+      console.debug('[CapMatrix] jwtLogin: stopping existing client (deviceId=' + existingDeviceId + ')');
       this.client.stopClient();
       this.client = undefined;
     }
 
-    console.debug('[CapMatrix] jwtLogin: exchanging JWT (token length=' + options.token.length + ')');
+    console.debug('[CapMatrix] jwtLogin: exchanging JWT (token length=' + options.token.length + ', existingDeviceId=' + (existingDeviceId ?? 'none') + ')');
     const tmpClient = createClient({ baseUrl: options.homeserverUrl });
     const res = await tmpClient.loginRequest({
       type: 'org.matrix.login.jwt',
       token: options.token,
       initial_device_display_name: 'Capacitor Matrix Plugin',
+      ...(existingDeviceId && { device_id: existingDeviceId }),
     });
     console.debug('[CapMatrix] jwtLogin: JWT exchange success, userId=' + res.user_id + ' deviceId=' + res.device_id);
 
@@ -204,8 +208,9 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       homeserverUrl: options.homeserverUrl,
     };
 
-    this.persistSession(session);
-    console.debug('[CapMatrix] jwtLogin: complete, session persisted');
+    // Do NOT persist JWT sessions to localStorage (insecure for web).
+    // Consumer calls jwtLogin each page load instead.
+    console.debug('[CapMatrix] jwtLogin: complete (session not persisted)');
     return session;
   }
 
