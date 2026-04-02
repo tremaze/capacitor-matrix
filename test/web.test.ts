@@ -377,6 +377,7 @@ describe('getRooms', () => {
       membership: 'join',
       avatarUrl: undefined,
       isDirect: false,
+      roomOrderTs: 1700000000000,
     });
   });
 });

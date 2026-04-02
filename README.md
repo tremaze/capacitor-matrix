@@ -1227,20 +1227,21 @@ removeAllListeners() => Promise<void>
 
 #### RoomSummary
 
-| Prop              | Type                                                              |
-| ----------------- | ----------------------------------------------------------------- |
-| **`roomId`**      | <code>string</code>                                               |
-| **`name`**        | <code>string</code>                                               |
-| **`topic`**       | <code>string</code>                                               |
-| **`memberCount`** | <code>number</code>                                               |
-| **`isEncrypted`** | <code>boolean</code>                                              |
-| **`unreadCount`** | <code>number</code>                                               |
-| **`lastEventTs`** | <code>number</code>                                               |
-| **`createdAt`**   | <code>number</code>                                               |
-| **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code>               |
-| **`avatarUrl`**   | <code>string</code>                                               |
-| **`isDirect`**    | <code>boolean</code>                                              |
-| **`latestEvent`** | <code><a href="#latesteventpreview">LatestEventPreview</a></code> |
+| Prop              | Type                                                              | Description                                                                               |
+| ----------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **`roomId`**      | <code>string</code>                                               |                                                                                           |
+| **`name`**        | <code>string</code>                                               |                                                                                           |
+| **`topic`**       | <code>string</code>                                               |                                                                                           |
+| **`memberCount`** | <code>number</code>                                               |                                                                                           |
+| **`isEncrypted`** | <code>boolean</code>                                              |                                                                                           |
+| **`unreadCount`** | <code>number</code>                                               |                                                                                           |
+| **`lastEventTs`** | <code>number</code>                                               |                                                                                           |
+| **`createdAt`**   | <code>number</code>                                               |                                                                                           |
+| **`membership`**  | <code>'join' \| 'invite' \| 'leave' \| 'ban'</code>               |                                                                                           |
+| **`avatarUrl`**   | <code>string</code>                                               |                                                                                           |
+| **`isDirect`**    | <code>boolean</code>                                              |                                                                                           |
+| **`latestEvent`** | <code><a href="#latesteventpreview">LatestEventPreview</a></code> |                                                                                           |
+| **`roomOrderTs`** | <code>number</code>                                               | Pre-computed sort timestamp. Use this for room ordering instead of lastEventTs/createdAt. |
 
 
 #### LatestEventPreview

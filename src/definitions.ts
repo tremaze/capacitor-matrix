@@ -166,6 +166,8 @@ export interface RoomSummary {
   avatarUrl?: string;
   isDirect?: boolean;
   latestEvent?: LatestEventPreview;
+  /** Pre-computed sort timestamp. Use this for room ordering instead of lastEventTs/createdAt. */
+  roomOrderTs: number;
 }
 
 export interface RoomMember {

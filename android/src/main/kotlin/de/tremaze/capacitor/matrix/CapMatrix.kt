@@ -14,8 +14,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -773,22 +776,36 @@ class CapMatrix(private val context: Context) {
             val c = client ?: throw MatrixBridgeError.NotLoggedIn()
             val rooms = c.rooms()
             Log.d(TAG, "getRooms: SDK returned ${rooms.size} rooms total")
-            val result = mutableListOf<Map<String, Any?>>()
+            // Pass 1: serialize all rooms, collect IDs needing createdAt
+            val serialized = mutableListOf<MutableMap<String, Any?>>()
+            val needCreatedAt = mutableListOf<String>()
             for (room in rooms) {
                 if (room.membership() != Membership.JOINED) continue
                 if (isStaleRoom(room.id())) continue
                 try {
                     val dict = serializeRoom(room).toMutableMap()
                     if (dict["lastEventTs"] == null) {
-                        fetchRoomCreatedAt(room.id())?.let { ts ->
-                            dict["createdAt"] = ts
-                        }
+                        needCreatedAt.add(room.id())
                     }
-                    result.add(dict)
+                    serialized.add(dict)
                 } catch (e: Exception) {
                     Log.d(TAG, "getRooms: skipping ${room.id()}: ${e.message}")
                 }
             }
+
+            // Pass 2: batch-fetch createdAt concurrently for rooms without lastEventTs
+            val createdAts = fetchRoomCreatedAts(needCreatedAt)
+
+            // Pass 3: compute roomOrderTs
+            val result = serialized.map { dict ->
+                val roomId = dict["roomId"] as? String ?: ""
+                val lastEventTs = dict["lastEventTs"] as? Long
+                val createdAt = createdAts[roomId] ?: dict["createdAt"] as? Long
+                if (createdAt != null) dict["createdAt"] = createdAt
+                dict["roomOrderTs"] = lastEventTs ?: createdAt ?: 0L
+                dict
+            }
+
             Log.d(TAG, "getRooms: returning ${result.size} joined rooms (filtered from ${rooms.size})")
             cachedGetRoomsResult = result
             cachedGetRoomsTimestamp = System.currentTimeMillis()
@@ -796,17 +813,15 @@ class CapMatrix(private val context: Context) {
         }
     }
 
-    private suspend fun fetchRoomCreatedAt(roomId: String): Long? {
-        roomCreatedAtCache[roomId]?.let { return it }
-        val session = sessionStore.load() ?: return null
-        val baseUrl = session.homeserverUrl.trimEnd('/')
+    private suspend fun fetchSingleRoomCreatedAt(roomId: String, baseUrl: String, accessToken: String): Pair<String, Long>? {
+        roomCreatedAtCache[roomId]?.let { return roomId to it }
         val encodedRoomId = URLEncoder.encode(roomId, "UTF-8")
         val urlStr = "$baseUrl/_matrix/client/v3/rooms/$encodedRoomId/state"
 
         return try {
             val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+                setRequestProperty("Authorization", "Bearer $accessToken")
                 connectTimeout = 15_000
                 readTimeout = 15_000
             }
@@ -823,7 +838,7 @@ class CapMatrix(private val context: Context) {
                         val ts = event.optLong("origin_server_ts", 0L)
                         if (ts > 0) {
                             roomCreatedAtCache[roomId] = ts
-                            return ts
+                            return roomId to ts
                         }
                     }
                 }
@@ -834,6 +849,30 @@ class CapMatrix(private val context: Context) {
         } catch (e: Exception) {
             null
         }
+    }
+
+    private suspend fun fetchRoomCreatedAts(roomIds: List<String>): Map<String, Long> {
+        if (roomIds.isEmpty()) return emptyMap()
+        val uncached = roomIds.filter { roomCreatedAtCache[it] == null }
+        if (uncached.isEmpty()) return roomIds.mapNotNull { id ->
+            roomCreatedAtCache[id]?.let { id to it }
+        }.toMap()
+
+        val session = sessionStore.load() ?: return roomIds.mapNotNull { id ->
+            roomCreatedAtCache[id]?.let { id to it }
+        }.toMap()
+        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val semaphore = Semaphore(5)
+
+        uncached.map { roomId ->
+            scope.async<Pair<String, Long>?> {
+                semaphore.withPermit { fetchSingleRoomCreatedAt(roomId, baseUrl, session.accessToken) }
+            }
+        }.mapNotNull { it.await() }.forEach { (roomId, ts) ->
+            roomCreatedAtCache[roomId] = ts
+        }
+
+        return roomIds.mapNotNull { id -> roomCreatedAtCache[id]?.let { id to it } }.toMap()
     }
 
     suspend fun getRoomMembers(roomId: String): List<Map<String, Any?>> {
@@ -1769,6 +1808,8 @@ class CapMatrix(private val context: Context) {
             val latestEvent = room.latestEvent()
             val latestEventDict = serializeLatestEventValue(latestEvent, room.id())
 
+            val lastEventTs = latestEventDict?.get("originServerTs") as? Long
+
             val dict = mutableMapOf<String, Any?>(
                 "roomId" to room.id(),
                 "name" to (info.displayName ?: ""),
@@ -1776,10 +1817,11 @@ class CapMatrix(private val context: Context) {
                 "memberCount" to (info.joinedMembersCount?.toInt() ?: 0),
                 "isEncrypted" to room.isEncrypted(),
                 "unreadCount" to (info.numUnreadMessages?.toInt() ?: 0),
-                "lastEventTs" to latestEventDict?.get("originServerTs"),
+                "lastEventTs" to lastEventTs,
                 "membership" to membership,
                 "avatarUrl" to null,
                 "isDirect" to isDirect,
+                "roomOrderTs" to (lastEventTs ?: 0L),
             )
             if (latestEventDict != null) {
                 dict["latestEvent"] = latestEventDict
@@ -2019,6 +2061,7 @@ private fun serializeEventTimelineItem(eventItem: EventTimelineItem, roomId: Str
             readBy = others
         }
     }
+    Log.d(TAG, "serializeEvent: eventId=$eventId sender=${eventItem.sender} receiptKeys=${receipts.keys.toList()} status=$status readBy=$readBy")
 
     // Build unsigned dict — include transaction_id when available
     var unsignedDict: Map<String, Any?>? = null
@@ -2137,6 +2180,7 @@ private class LiveTimelineListener(
                 }
                 is TimelineDiff.Set -> {
                     serializeTimelineItem(d.value, roomId)?.let { event ->
+                        Log.d(TAG, "  Set: idx=${d.index} eventId=${event["eventId"]} sender=${event["senderId"]} status=${event["status"]} readBy=${event["readBy"]}")
                         onMessage(event)
                         val rb = event["readBy"] as? List<*>
                         if (rb != null && rb.isNotEmpty()) {

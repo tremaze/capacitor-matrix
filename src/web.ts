@@ -1451,6 +1451,56 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       }
     }
 
+    const lastEventTs = room.getLastActiveTimestamp() || undefined;
+    const createdAt = room.currentState.getStateEvents('m.room.create', '')?.getTs() ?? undefined;
+
+    // ── roomOrderTs: pre-computed sort timestamp ──
+    const myUserId = this.client!.getUserId()!;
+    const myMembership = room.getMyMembership();
+
+    // Step 1: getLastActiveTimestamp (incorporates SSS bump stamp)
+    let roomOrderTs = room.getLastActiveTimestamp() || 0;
+
+    // Step 2: Non-joined rooms — prefer membership event timestamp
+    if (myMembership !== 'join' && myMembership !== undefined) {
+      const memberEvent = room.currentState.getStateEvents(EventType.RoomMember, myUserId);
+      if (memberEvent) {
+        roomOrderTs = Math.max(roomOrderTs, memberEvent.getTs());
+      }
+    }
+
+    // Step 3: Walk timeline for last relevant activity
+    if (roomOrderTs === 0) {
+      for (let i = timeline.length - 1; i >= 0; i--) {
+        const evt = timeline[i];
+        const evtType = evt.getType();
+
+        if (evtType === EventType.RoomMember) {
+          const content = evt.getContent();
+          const prevContent = evt.getPrevContent();
+          if (content.membership === prevContent.membership) continue; // profile-only
+        }
+
+        const isOwnEvent = evt.getSender() === myUserId;
+        const isUnreadTrigger = [
+          EventType.RoomMessage, EventType.Sticker,
+          EventType.RoomMember, // membership changes only (profile-only filtered above)
+        ].includes(evtType as any);
+
+        if (isOwnEvent || isUnreadTrigger) {
+          roomOrderTs = evt.getTs();
+          break;
+        }
+      }
+    }
+
+    // Step 4: Fallback to creation timestamp
+    if (roomOrderTs === 0 && createdAt) {
+      roomOrderTs = createdAt;
+    }
+    // Step 5: Empty → 0
+    // Step 6: Threads → // TODO: Thread timestamp support
+
     return {
       roomId: room.roomId,
       name: room.name,
@@ -1458,12 +1508,13 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       memberCount: room.getJoinedMemberCount(),
       isEncrypted: room.hasEncryptionStateEvent(),
       unreadCount: room.getUnreadNotificationCount() ?? 0,
-      lastEventTs: room.getLastActiveTimestamp() || undefined,
-      createdAt: room.currentState.getStateEvents('m.room.create', '')?.getTs() ?? undefined,
-      membership: room.getMyMembership() as RoomSummary['membership'],
+      lastEventTs,
+      createdAt,
+      membership: myMembership as RoomSummary['membership'],
       avatarUrl,
       isDirect,
       latestEvent,
+      roomOrderTs,
     };
   }
 

@@ -731,41 +731,53 @@ class MatrixSDKBridge {
         guard let c = client else {
             throw MatrixBridgeError.notLoggedIn
         }
-        var result: [[String: Any]] = []
+
+        // Pass 1: serialize all rooms, collect IDs needing createdAt
+        var serialized: [[String: Any]] = []
+        var needCreatedAt: [String] = []
         for room in c.rooms() {
             guard room.membership() == .joined else { continue }
             guard !isStaleRoom(roomId: room.id()) else { continue }
             do {
-                var dict = try await Self.serializeRoom(room)
-                if dict["lastEventTs"] as? UInt64 == nil {
-                    if let ts = await fetchRoomCreatedAt(roomId: room.id()) {
-                        dict["createdAt"] = ts
-                    }
+                let dict = try await Self.serializeRoom(room)
+                if dict["lastEventTs"] is NSNull || dict["lastEventTs"] == nil {
+                    needCreatedAt.append(room.id())
                 }
-                result.append(dict)
+                serialized.append(dict)
             } catch {
                 print("[CapMatrix] getRooms: skipping \(room.id()): \(error)")
             }
         }
+
+        // Pass 2: batch-fetch createdAt concurrently
+        let createdAts = await fetchRoomCreatedAts(roomIds: needCreatedAt)
+
+        // Pass 3: compute roomOrderTs
+        let result: [[String: Any]] = serialized.map { dict in
+            var d = dict
+            let roomId = d["roomId"] as? String ?? ""
+            let lastEventTs = d["lastEventTs"] as? UInt64
+            let createdAt = createdAts[roomId] ?? d["createdAt"] as? UInt64
+            if let createdAt { d["createdAt"] = createdAt }
+            d["roomOrderTs"] = lastEventTs ?? createdAt ?? UInt64(0)
+            return d
+        }
         return result
     }
 
-    private func fetchRoomCreatedAt(roomId: String) async -> UInt64? {
+    private func fetchSingleRoomCreatedAt(roomId: String, baseUrl: String, accessToken: String) async -> (String, UInt64)? {
         createdAtLock.lock()
         let cached = roomCreatedAtCache[roomId]
         createdAtLock.unlock()
-        if let cached { return cached }
-        guard let session = sessionStore.load() else { return nil }
-        let baseUrl = session.homeserverUrl.hasSuffix("/")
-            ? String(session.homeserverUrl.dropLast())
-            : session.homeserverUrl
+        if let cached { return (roomId, cached) }
+
         guard let encodedRoomId = roomId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
               let url = URL(string: "\(baseUrl)/_matrix/client/v3/rooms/\(encodedRoomId)/state") else {
             return nil
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let statusCode = (response as? HTTPURLResponse)?.statusCode,
               statusCode >= 200, statusCode < 300,
@@ -778,10 +790,69 @@ class MatrixSDKBridge {
                 createdAtLock.lock()
                 roomCreatedAtCache[roomId] = ts
                 createdAtLock.unlock()
-                return ts
+                return (roomId, ts)
             }
         }
         return nil
+    }
+
+    private func fetchRoomCreatedAts(roomIds: [String]) async -> [String: UInt64] {
+        if roomIds.isEmpty { return [:] }
+
+        createdAtLock.lock()
+        let uncached = roomIds.filter { roomCreatedAtCache[$0] == nil }
+        createdAtLock.unlock()
+
+        if uncached.isEmpty {
+            createdAtLock.lock()
+            let result = roomIds.compactMap { id -> (String, UInt64)? in
+                guard let ts = roomCreatedAtCache[id] else { return nil }
+                return (id, ts)
+            }
+            createdAtLock.unlock()
+            return Dictionary(uniqueKeysWithValues: result)
+        }
+
+        guard let session = sessionStore.load() else {
+            createdAtLock.lock()
+            let result = roomIds.compactMap { id -> (String, UInt64)? in
+                guard let ts = roomCreatedAtCache[id] else { return nil }
+                return (id, ts)
+            }
+            createdAtLock.unlock()
+            return Dictionary(uniqueKeysWithValues: result)
+        }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+
+        // Fetch concurrently with max 5 parallel requests
+        await withTaskGroup(of: (String, UInt64)?.self) { group in
+            let semaphore = AsyncSemaphore(limit: 5)
+            for roomId in uncached {
+                group.addTask {
+                    await semaphore.wait()
+                    let result = await self.fetchSingleRoomCreatedAt(roomId: roomId, baseUrl: baseUrl, accessToken: session.accessToken)
+                    await semaphore.signal()
+                    return result
+                }
+            }
+            for await result in group {
+                if let (roomId, ts) = result {
+                    self.createdAtLock.lock()
+                    self.roomCreatedAtCache[roomId] = ts
+                    self.createdAtLock.unlock()
+                }
+            }
+        }
+
+        createdAtLock.lock()
+        let result = roomIds.compactMap { id -> (String, UInt64)? in
+            guard let ts = roomCreatedAtCache[id] else { return nil }
+            return (id, ts)
+        }
+        createdAtLock.unlock()
+        return Dictionary(uniqueKeysWithValues: result)
     }
 
     func getRoomMembers(roomId: String) async throws -> [[String: Any]] {
@@ -1759,6 +1830,7 @@ class MatrixSDKBridge {
 
         let latestEvent = await room.latestEvent()
         let latestEventDict = serializeLatestEventValue(latestEvent, roomId: room.id())
+        let lastEventTs = latestEventDict?["originServerTs"] as? UInt64
 
         var dict: [String: Any] = [
             "roomId": room.id(),
@@ -1767,10 +1839,11 @@ class MatrixSDKBridge {
             "memberCount": info.joinedMembersCount ?? 0,
             "isEncrypted": encrypted,
             "unreadCount": info.numUnreadMessages ?? 0,
-            "lastEventTs": latestEventDict?["originServerTs"] as Any,
+            "lastEventTs": lastEventTs as Any,
             "membership": membership,
             "avatarUrl": avatarUrl as Any,
             "isDirect": isDirect,
+            "roomOrderTs": lastEventTs ?? UInt64(0),
         ]
         if let le = latestEventDict {
             dict["latestEvent"] = le
@@ -2421,5 +2494,38 @@ class MatrixKeychainStore {
             kSecAttrAccount as String: "session"
         ]
         SecItemDelete(query as CFDictionary)
+    }
+}
+
+// MARK: - AsyncSemaphore
+
+/// A simple async-compatible semaphore for limiting concurrency in task groups.
+private actor AsyncSemaphore {
+    private let limit: Int
+    private var count: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        self.limit = limit
+        self.count = limit
+    }
+
+    func wait() async {
+        if count > 0 {
+            count -= 1
+        } else {
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    func signal() {
+        if waiters.isEmpty {
+            count = min(count + 1, limit)
+        } else {
+            let waiter = waiters.removeFirst()
+            waiter.resume()
+        }
     }
 }
