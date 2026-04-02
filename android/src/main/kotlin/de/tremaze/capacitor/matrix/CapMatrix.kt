@@ -2241,20 +2241,13 @@ private class LiveTimelineListener(
     private fun updateWatermarkFromItem(item: TimelineItem) {
         val eventItem = item.asEvent() ?: return
         if (myUserId == null) return
-        val allReceipts = eventItem.readReceipts
-        val others = allReceipts.keys.filter { it != myUserId }
+        val others = eventItem.readReceipts.keys.filter { it != myUserId }
         if (others.isNotEmpty()) {
             val ts = eventItem.timestamp.toLong()
-            val eventId = extractEventId(eventItem.eventOrTransactionId)
-            Log.d(TAG, "updateWatermark: eventId=$eventId sender=${eventItem.sender} ts=$ts receipts=$others (prev watermarkTs=$watermarkTs)")
             if (ts > watermarkTs) {
                 watermarkTs = ts
                 watermarkReadBy = others
             }
-        } else if (allReceipts.isNotEmpty()) {
-            // Receipt exists but only from self — log to see if the SDK received it
-            val eventId = extractEventId(eventItem.eventOrTransactionId)
-            Log.d(TAG, "updateWatermark: eventId=$eventId selfReceiptOnly keys=${allReceipts.keys.toList()}")
         }
     }
 
@@ -2302,44 +2295,25 @@ private class LiveTimelineListener(
         }
     }
 
-    private fun dumpTimelineItem(label: String, item: TimelineItem, index: Int? = null) {
-        val eventItem = item.asEvent()
-        if (eventItem == null) {
-            Log.d(TAG, "  $label:${if (index != null) " idx=$index" else ""} (virtual/non-event)")
-            return
-        }
-        val eventId = extractEventId(eventItem.eventOrTransactionId)
-        val isLocalEcho = eventItem.eventOrTransactionId is EventOrTransactionId.TransactionId
-        val allReceipts = eventItem.readReceipts.keys.toList()
-        val sendState = eventItem.localSendState
-        Log.d(TAG, "  $label:${if (index != null) " idx=$index" else ""} eventId=$eventId sender=${eventItem.sender} ts=${eventItem.timestamp.toLong()} receipts=$allReceipts localEcho=$isLocalEcho sendState=$sendState")
-    }
-
     override fun onUpdate(diff: List<TimelineDiff>) {
         if (isPaginating()) return
-        Log.d(TAG, "onUpdate[$roomId]: ${diff.size} diffs, types=${diff.map { it::class.simpleName }}")
         var needsRoomUpdate = false
         val setItems = mutableListOf<TimelineItem>()
         for (d in diff) {
             when (d) {
                 is TimelineDiff.Reset -> {
-                    Log.d(TAG, "  Reset: ${d.values.size} items (clearing watermark from ts=$watermarkTs readBy=$watermarkReadBy)")
                     watermarkTs = -1
                     watermarkReadBy = null
                     d.values.forEach { updateWatermarkFromItem(it) }
-                    Log.d(TAG, "  Reset after scan: watermarkTs=$watermarkTs readBy=$watermarkReadBy")
                     d.values.forEach { serializeAndEmit(it) }
                     needsRoomUpdate = true
                 }
                 is TimelineDiff.Append -> {
-                    Log.d(TAG, "  Append: ${d.values.size} items (watermarkTs=$watermarkTs readBy=$watermarkReadBy)")
                     d.values.forEach { updateWatermarkFromItem(it) }
-                    Log.d(TAG, "  Append after scan: watermarkTs=$watermarkTs readBy=$watermarkReadBy")
                     d.values.forEach { serializeAndEmit(it) }
                     needsRoomUpdate = true
                 }
                 is TimelineDiff.PushBack -> {
-                    dumpTimelineItem("PushBack", d.value)
                     val eventItem = d.value.asEvent()
                     var skipLocalEcho = false
                     if (eventItem != null && eventItem.eventOrTransactionId is EventOrTransactionId.TransactionId) {
@@ -2352,26 +2326,19 @@ private class LiveTimelineListener(
                     needsRoomUpdate = true
                 }
                 is TimelineDiff.PushFront -> {
-                    dumpTimelineItem("PushFront", d.value)
                     updateWatermarkFromItem(d.value)
                     serializeAndEmit(d.value)
                 }
                 is TimelineDiff.Set -> {
-                    dumpTimelineItem("Set", d.value, d.index.toInt())
                     setItems.add(d.value)
                 }
                 is TimelineDiff.Insert -> {
-                    dumpTimelineItem("Insert", d.value, d.index.toInt())
                     updateWatermarkFromItem(d.value)
                     serializeAndEmit(d.value)
                     needsRoomUpdate = true
                 }
-                is TimelineDiff.Remove -> {
-                    Log.d(TAG, "  Remove: idx=${d.index}")
-                }
-                else -> {
-                    Log.d(TAG, "  Other: ${d::class.simpleName}")
-                }
+                is TimelineDiff.Remove -> { }
+                else -> { }
             }
         }
         if (setItems.isNotEmpty()) {
