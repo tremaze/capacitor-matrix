@@ -19,7 +19,7 @@ import { decodeRecoveryKey } from 'matrix-js-sdk/lib/crypto-api/recovery-key';
 import type {
   MatrixPlugin,
   LoginOptions,
-  LoginWithTokenOptions,
+  JwtLoginOptions,
   SessionInfo,
   SendMessageOptions,
   EditMessageOptions,
@@ -161,22 +161,34 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     return session;
   }
 
-  async loginWithToken(options: LoginWithTokenOptions): Promise<SessionInfo> {
+  async jwtLogin(options: JwtLoginOptions): Promise<SessionInfo> {
+    console.debug('[CapMatrix] jwtLogin: starting, hasExistingClient=' + !!this.client);
     // Stop any previously running client to avoid parallel instances that
     // would deadlock on the shared IndexedDB crypto store.
     if (this.client) {
+      console.debug('[CapMatrix] jwtLogin: stopping existing client');
       this.client.stopClient();
       this.client = undefined;
     }
 
+    console.debug('[CapMatrix] jwtLogin: exchanging JWT (token length=' + options.token.length + ')');
+    const tmpClient = createClient({ baseUrl: options.homeserverUrl });
+    const res = await tmpClient.loginRequest({
+      type: 'org.matrix.login.jwt',
+      token: options.token,
+      initial_device_display_name: 'Capacitor Matrix Plugin',
+    });
+    console.debug('[CapMatrix] jwtLogin: JWT exchange success, userId=' + res.user_id + ' deviceId=' + res.device_id);
+
     let store: IndexedDBStore | undefined;
-    try { store = await this.createSyncStore(options.userId, /* fresh */ false); } catch { }
+    try { store = await this.createSyncStore(res.user_id, /* fresh */ false); } catch { }
+    console.debug('[CapMatrix] jwtLogin: syncStore=' + (store ? 'created' : 'none'));
 
     this.client = createClient({
       baseUrl: options.homeserverUrl,
-      accessToken: options.accessToken,
-      userId: options.userId,
-      deviceId: options.deviceId,
+      accessToken: res.access_token,
+      userId: res.user_id,
+      deviceId: res.device_id,
       cryptoCallbacks: this._cryptoCallbacks,
       refreshToken: 'jwt-placeholder',
       tokenRefreshFunction: this.createTokenRefreshFunction(),
@@ -186,13 +198,14 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     if (store) { await store.startup(); this.syncStore = store; }
 
     const session: SessionInfo = {
-      accessToken: options.accessToken,
-      userId: options.userId,
-      deviceId: options.deviceId,
+      accessToken: res.access_token,
+      userId: res.user_id,
+      deviceId: res.device_id,
       homeserverUrl: options.homeserverUrl,
     };
 
     this.persistSession(session);
+    console.debug('[CapMatrix] jwtLogin: complete, session persisted');
     return session;
   }
 
@@ -236,10 +249,16 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async getSession(): Promise<SessionInfo | null> {
     const raw = localStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
+    if (!raw) {
+      console.debug('[CapMatrix] getSession: no stored session');
+      return null;
+    }
     try {
-      return JSON.parse(raw) as SessionInfo;
+      const session = JSON.parse(raw) as SessionInfo;
+      console.debug('[CapMatrix] getSession: found userId=' + session.userId + ' deviceId=' + session.deviceId + ' client=' + !!this.client);
+      return session;
     } catch {
+      console.debug('[CapMatrix] getSession: malformed JSON in storage');
       return null;
     }
   }
@@ -271,6 +290,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   // ── Sync ──────────────────────────────────────────────
 
   async startSync(): Promise<void> {
+    console.debug('[CapMatrix] startSync: client=' + !!this.client);
     this.requireClient();
 
     this.client!.on(ClientEvent.Sync, (state, _prev, data) => {
@@ -461,7 +481,9 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   async getRooms(): Promise<{ rooms: RoomSummary[] }> {
     this.requireClient();
-    const rooms = this.client!.getRooms().map((r) => this.serializeRoom(r));
+    const allRooms = this.client!.getRooms();
+    const rooms = allRooms.map((r) => this.serializeRoom(r));
+    console.debug('[CapMatrix] getRooms: total=' + allRooms.length + ', serialized=' + rooms.length);
     return { rooms };
   }
 
@@ -924,6 +946,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   // ── Encryption ──────────────────────────────────────────
 
   async initializeCrypto(): Promise<void> {
+    console.debug('[CapMatrix] initializeCrypto: client=' + !!this.client);
     this.requireClient();
 
     // Pre-initialize the WASM module with a root-relative URL before
@@ -961,6 +984,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     if (crypto?.outgoingRequestsManager?.doProcessOutgoingRequests) {
       await crypto.outgoingRequestsManager.doProcessOutgoingRequests();
     }
+    console.debug('[CapMatrix] initializeCrypto: done');
   }
 
   private async deleteCryptoStore(): Promise<void> {
@@ -988,6 +1012,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     this.requireClient();
     const crypto = this.client!.getCrypto();
     if (!crypto) {
+      console.debug('[CapMatrix] getEncryptionStatus: crypto not initialized');
       return {
         isCrossSigningReady: false,
         crossSigningStatus: { hasMaster: false, hasSelfSigning: false, hasUserSigning: false, isReady: false },
@@ -1005,6 +1030,11 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     // cross-signing keys are stored (too strict for Phase 1).
     const ssStatus = await crypto.getSecretStorageStatus();
     const ssHasKey = ssStatus.defaultKeyId !== null;
+
+    console.debug('[CapMatrix] getEncryptionStatus: csReady=' + csReady +
+      ', hasMaster=' + csStatus.publicKeysOnDevice +
+      ', backup=' + backupVersion +
+      ', ssReady=' + ssHasKey);
 
     return {
       isCrossSigningReady: csReady,
@@ -1108,10 +1138,12 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
   async isRecoveryEnabled(): Promise<{ enabled: boolean }> {
     const crypto = await this.ensureCrypto();
     const ready = await crypto.isSecretStorageReady();
+    console.debug('[CapMatrix] isRecoveryEnabled: ready=' + ready);
     return { enabled: ready };
   }
 
   async recoverAndSetup(options: { recoveryKey?: string; passphrase?: string }): Promise<void> {
+    console.debug('[CapMatrix] recoverAndSetup: hasRecoveryKey=' + !!options.recoveryKey + ', hasPassphrase=' + !!options.passphrase);
     const crypto = await this.ensureCrypto();
 
     // Derive/decode the secret storage key
@@ -1214,7 +1246,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   private requireClient(): void {
     if (!this.client) {
-      throw new Error('Not logged in. Call login() or loginWithToken() first.');
+      throw new Error('Not logged in. Call login() or jwtLogin() first.');
     }
   }
 

@@ -7,7 +7,7 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "Matrix"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "login", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "loginWithToken", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "jwtLogin", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "logout", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getSession", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startSync", returnType: CAPPluginReturnPromise),
@@ -80,21 +80,17 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    @objc func loginWithToken(_ call: CAPPluginCall) {
+    @objc func jwtLogin(_ call: CAPPluginCall) {
         guard let homeserverUrl = call.getString("homeserverUrl"),
-              let accessToken = call.getString("accessToken"),
-              let userId = call.getString("userId"),
-              let deviceId = call.getString("deviceId") else {
+              let token = call.getString("token") else {
             return call.reject("Missing required parameters")
         }
 
         Task {
             do {
-                let session = try await matrixBridge.loginWithToken(
+                let session = try await matrixBridge.jwtLogin(
                     homeserverUrl: homeserverUrl,
-                    accessToken: accessToken,
-                    userId: userId,
-                    deviceId: deviceId
+                    token: token
                 )
                 call.resolve(session)
             } catch {

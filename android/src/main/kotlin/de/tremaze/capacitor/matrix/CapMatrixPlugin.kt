@@ -46,22 +46,21 @@ class CapMatrixPlugin : Plugin() {
     }
 
     @PluginMethod
-    fun loginWithToken(call: PluginCall) {
+    fun jwtLogin(call: PluginCall) {
         val homeserverUrl = call.getString("homeserverUrl")
             ?: return call.reject("Missing homeserverUrl")
-        val accessToken = call.getString("accessToken")
-            ?: return call.reject("Missing accessToken")
-        val userId = call.getString("userId")
-            ?: return call.reject("Missing userId")
-        val deviceId = call.getString("deviceId")
-            ?: return call.reject("Missing deviceId")
+        val token = call.getString("token")
+            ?: return call.reject("Missing token")
 
+        android.util.Log.d("CapMatrixPlugin", "jwtLogin: received call, launching coroutine")
         scope.launch {
             try {
-                val session = matrixBridge.loginWithToken(homeserverUrl, accessToken, userId, deviceId)
+                val session = matrixBridge.jwtLogin(homeserverUrl, token)
+                android.util.Log.d("CapMatrixPlugin", "jwtLogin: bridge returned, resolving to JS")
                 call.resolve(mapToJSObject(session))
             } catch (e: Exception) {
-                call.reject(e.message ?: "loginWithToken failed", e)
+                android.util.Log.w("CapMatrixPlugin", "jwtLogin: failed — ${e.message}")
+                call.reject(e.message ?: "jwtLogin failed", e)
             }
         }
     }
@@ -124,6 +123,7 @@ class CapMatrixPlugin : Plugin() {
 
     @PluginMethod
     fun startSync(call: PluginCall) {
+        android.util.Log.d("CapMatrixPlugin", "startSync: received call")
         scope.launch {
             try {
                 matrixBridge.startSync(
@@ -183,13 +183,16 @@ class CapMatrixPlugin : Plugin() {
 
     @PluginMethod
     fun getRooms(call: PluginCall) {
+        android.util.Log.d("CapMatrixPlugin", "getRooms: received call")
         scope.launch {
             try {
                 val rooms = matrixBridge.getRooms()
+                android.util.Log.d("CapMatrixPlugin", "getRooms: returning ${rooms.size} rooms")
                 val arr = JSArray()
                 rooms.forEach { arr.put(mapToJSONObject(it)) }
                 call.resolve(JSObject().put("rooms", arr))
             } catch (e: Exception) {
+                android.util.Log.w("CapMatrixPlugin", "getRooms: failed — ${e.message}")
                 call.reject(e.message ?: "getRooms failed", e)
             }
         }
@@ -444,11 +447,14 @@ class CapMatrixPlugin : Plugin() {
 
     @PluginMethod
     fun initializeCrypto(call: PluginCall) {
+        android.util.Log.d("CapMatrixPlugin", "initializeCrypto: received call")
         scope.launch {
             try {
                 matrixBridge.initializeCrypto()
+                android.util.Log.d("CapMatrixPlugin", "initializeCrypto: resolved")
                 call.resolve()
             } catch (e: Exception) {
+                android.util.Log.w("CapMatrixPlugin", "initializeCrypto: failed — ${e.message}")
                 call.reject(e.message ?: "initializeCrypto failed", e)
             }
         }
@@ -456,11 +462,14 @@ class CapMatrixPlugin : Plugin() {
 
     @PluginMethod
     fun getEncryptionStatus(call: PluginCall) {
+        android.util.Log.d("CapMatrixPlugin", "getEncryptionStatus: received call")
         scope.launch {
             try {
                 val status = matrixBridge.getEncryptionStatus()
+                android.util.Log.d("CapMatrixPlugin", "getEncryptionStatus: resolved")
                 call.resolve(mapToJSObject(status))
             } catch (e: Exception) {
+                android.util.Log.w("CapMatrixPlugin", "getEncryptionStatus: failed — ${e.message}")
                 call.reject(e.message ?: "getEncryptionStatus failed", e)
             }
         }

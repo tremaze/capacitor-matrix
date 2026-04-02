@@ -313,7 +313,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 <docgen-index>
 
 * [`login(...)`](#login)
-* [`loginWithToken(...)`](#loginwithtoken)
+* [`jwtLogin(...)`](#jwtlogin)
 * [`logout()`](#logout)
 * [`getSession()`](#getsession)
 * [`startSync()`](#startsync)
@@ -396,15 +396,15 @@ login(options: LoginOptions) => Promise<SessionInfo>
 --------------------
 
 
-### loginWithToken(...)
+### jwtLogin(...)
 
 ```typescript
-loginWithToken(options: LoginWithTokenOptions) => Promise<SessionInfo>
+jwtLogin(options: JwtLoginOptions) => Promise<SessionInfo>
 ```
 
-| Param         | Type                                                                    |
-| ------------- | ----------------------------------------------------------------------- |
-| **`options`** | <code><a href="#loginwithtokenoptions">LoginWithTokenOptions</a></code> |
+| Param         | Type                                                        |
+| ------------- | ----------------------------------------------------------- |
+| **`options`** | <code><a href="#jwtloginoptions">JwtLoginOptions</a></code> |
 
 **Returns:** <code>Promise&lt;<a href="#sessioninfo">SessionInfo</a>&gt;</code>
 
@@ -1217,14 +1217,12 @@ removeAllListeners() => Promise<void>
 | **`password`**      | <code>string</code> |
 
 
-#### LoginWithTokenOptions
+#### JwtLoginOptions
 
 | Prop                | Type                |
 | ------------------- | ------------------- |
 | **`homeserverUrl`** | <code>string</code> |
-| **`accessToken`**   | <code>string</code> |
-| **`userId`**        | <code>string</code> |
-| **`deviceId`**      | <code>string</code> |
+| **`token`**         | <code>string</code> |
 
 
 #### RoomSummary

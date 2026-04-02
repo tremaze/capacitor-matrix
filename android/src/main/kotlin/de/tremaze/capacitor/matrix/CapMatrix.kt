@@ -125,33 +125,99 @@ class CapMatrix(private val context: Context) {
         return info.toMap()
     }
 
-    suspend fun loginWithToken(
+    suspend fun jwtLogin(
         homeserverUrl: String,
-        accessToken: String,
-        userId: String,
-        deviceId: String
+        token: String
     ): Map<String, String> {
+        Log.d(TAG, "jwtLogin: acquiring loginMutex… client=${client != null}")
         return loginMutex.withLock {
+            Log.d(TAG, "jwtLogin: mutex acquired")
             try {
-                _loginWithToken(homeserverUrl, accessToken, userId, deviceId)
+                _jwtLogin(homeserverUrl, token)
             } catch (e: Exception) {
                 if (e.message?.contains("account in the store") == true) {
-                    Log.w(TAG, "Crypto store mismatch — clearing data and retrying login")
+                    Log.w(TAG, "jwtLogin: crypto store mismatch — clearing data and retrying")
                     clearAllData()
-                    _loginWithToken(homeserverUrl, accessToken, userId, deviceId)
+                    _jwtLogin(homeserverUrl, token)
                 } else {
+                    Log.w(TAG, "jwtLogin: failed with ${e.javaClass.simpleName}: ${e.message}")
                     throw e
                 }
             }
+        }.also { Log.d(TAG, "jwtLogin: complete, returning session for ${it["userId"]}") }
+    }
+
+    private suspend fun _jwtLogin(
+        homeserverUrl: String,
+        token: String
+    ): Map<String, String> {
+        val existingDeviceId = sessionStore.load()?.deviceId
+        Log.d(TAG, "_jwtLogin: exchanging JWT for credentials… existingDeviceId=$existingDeviceId")
+        val creds = exchangeJwtForCredentials(homeserverUrl, token, existingDeviceId)
+        Log.d(TAG, "_jwtLogin: got credentials userId=${creds.userId} deviceId=${creds.deviceId}")
+        return _restoreWithCredentials(homeserverUrl, creds.accessToken, creds.userId, creds.deviceId)
+    }
+
+    private data class MatrixCredentials(
+        val accessToken: String,
+        val userId: String,
+        val deviceId: String
+    )
+
+    private suspend fun exchangeJwtForCredentials(
+        homeserverUrl: String,
+        token: String,
+        existingDeviceId: String? = null
+    ): MatrixCredentials {
+        val baseUrl = homeserverUrl.trimEnd('/')
+        val url = "$baseUrl/_matrix/client/v3/login"
+        Log.d(TAG, "exchangeJwt: POST $url (token length=${token.length}, deviceId=${existingDeviceId ?: "none"})")
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/json")
+            connectTimeout = 15_000
+            readTimeout = 15_000
+            doOutput = true
+        }
+        try {
+            val payload = JSONObject().apply {
+                put("type", "org.matrix.login.jwt")
+                put("token", token)
+                put("initial_device_display_name", "Capacitor Matrix Plugin")
+                if (existingDeviceId != null) {
+                    put("device_id", existingDeviceId)
+                }
+            }
+            conn.outputStream.bufferedWriter().use { it.write(payload.toString()) }
+
+            val statusCode = conn.responseCode
+            Log.d(TAG, "exchangeJwt: response statusCode=$statusCode")
+            if (statusCode != 200) {
+                val errorBody = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+                Log.w(TAG, "exchangeJwt: FAILED — $errorBody")
+                throw MatrixBridgeError.Custom("JWT login failed (HTTP $statusCode): ${errorBody ?: "unknown error"}")
+            }
+            val body = conn.inputStream.bufferedReader().readText()
+            val json = JSONObject(body)
+            val creds = MatrixCredentials(
+                accessToken = json.getString("access_token"),
+                userId = json.getString("user_id"),
+                deviceId = json.getString("device_id")
+            )
+            Log.d(TAG, "exchangeJwt: success userId=${creds.userId} deviceId=${creds.deviceId}")
+            return creds
+        } finally {
+            conn.disconnect()
         }
     }
 
-    private suspend fun _loginWithToken(
+    private suspend fun _restoreWithCredentials(
         homeserverUrl: String,
         accessToken: String,
         userId: String,
         deviceId: String
     ): Map<String, String> {
+        Log.d(TAG, "_restoreWithCredentials: userId=$userId deviceId=$deviceId, existing client=${client != null}")
         // Stop existing sync and clean up stale references before replacing the client
         syncService?.stop()
         syncService = null
@@ -160,6 +226,7 @@ class CapMatrix(private val context: Context) {
         timelineListenerHandles.clear()
         roomTimelines.clear()
         subscribedRoomIds.clear()
+        Log.d(TAG, "_restoreWithCredentials: cleaned up old state, building new client…")
 
         val dataDir = dataDirectory()
         val cacheDir = cacheDirectory()
@@ -170,6 +237,7 @@ class CapMatrix(private val context: Context) {
             .slidingSyncVersionBuilder(SlidingSyncVersionBuilder.NATIVE)
             .autoEnableCrossSigning(true)
             .build()
+        Log.d(TAG, "_restoreWithCredentials: client built, restoring session…")
 
         val session = Session(
             accessToken = accessToken,
@@ -183,14 +251,16 @@ class CapMatrix(private val context: Context) {
 
         newClient.restoreSession(session)
         client = newClient
+        Log.d(TAG, "_restoreWithCredentials: session restored, client set. rooms=${newClient.rooms().size}")
 
         // Snapshot cached rooms and fetch server's authoritative joined-rooms list
         cachedRoomIds = newClient.rooms().map { it.id() }.toSet()
         serverJoinedRoomIds = fetchJoinedRoomIds(homeserverUrl, accessToken)
-        Log.d(TAG, "_loginWithToken: cachedRooms=${cachedRoomIds?.size}, serverJoined=${serverJoinedRoomIds?.size}")
+        Log.d(TAG, "_restoreWithCredentials: cachedRooms=${cachedRoomIds?.size}, serverJoined=${serverJoinedRoomIds?.size}")
 
         val info = SessionInfo(accessToken, userId, deviceId, homeserverUrl)
         sessionStore.save(info)
+        Log.d(TAG, "_restoreWithCredentials: session saved, done")
         return info.toMap()
     }
 
@@ -232,7 +302,9 @@ class CapMatrix(private val context: Context) {
     }
 
     fun getSession(): Map<String, String>? {
-        return sessionStore.load()?.toMap()
+        val session = sessionStore.load()
+        Log.d(TAG, "getSession: stored=${session != null}, client=${client != null}")
+        return session?.toMap()
     }
 
     suspend fun updateAccessToken(accessToken: String) {
@@ -643,10 +715,14 @@ class CapMatrix(private val context: Context) {
     // ── Rooms ────────────────────────────────────────────────────────────
 
     suspend fun getRooms(): List<Map<String, Any?>> {
+        Log.d(TAG, "getRooms: client=${client != null}")
         // Deduplicate rapid-fire getRooms calls: return cached result if <500ms old
         val now = System.currentTimeMillis()
         cachedGetRoomsResult?.let { cached ->
-            if (now - cachedGetRoomsTimestamp < 500) return cached
+            if (now - cachedGetRoomsTimestamp < 500) {
+                Log.d(TAG, "getRooms: returning cached result (${cached.size} rooms)")
+                return cached
+            }
         }
         return getRoomsMutex.withLock {
             // Re-check after acquiring lock — another caller may have just refreshed
@@ -655,6 +731,7 @@ class CapMatrix(private val context: Context) {
             }
             val c = client ?: throw MatrixBridgeError.NotLoggedIn()
             val rooms = c.rooms()
+            Log.d(TAG, "getRooms: SDK returned ${rooms.size} rooms total")
             val result = mutableListOf<Map<String, Any?>>()
             for (room in rooms) {
                 if (room.membership() != Membership.JOINED) continue
@@ -671,6 +748,7 @@ class CapMatrix(private val context: Context) {
                     Log.d(TAG, "getRooms: skipping ${room.id()}: ${e.message}")
                 }
             }
+            Log.d(TAG, "getRooms: returning ${result.size} joined rooms (filtered from ${rooms.size})")
             cachedGetRoomsResult = result
             cachedGetRoomsTimestamp = System.currentTimeMillis()
             result
@@ -1219,16 +1297,22 @@ class CapMatrix(private val context: Context) {
     // ── Encryption ───────────────────────────────────────────────────────
 
     suspend fun initializeCrypto() {
+        Log.d(TAG, "initializeCrypto: client=${client != null}")
         val c = client ?: throw MatrixBridgeError.NotLoggedIn()
-        c.encryption().waitForE2eeInitializationTasks()
+        val enc = c.encryption()
+        Log.d(TAG, "initializeCrypto: verificationState=${enc.verificationState()}, backupState=${enc.backupState()}, recoveryState=${enc.recoveryState()}")
+        enc.waitForE2eeInitializationTasks()
+        Log.d(TAG, "initializeCrypto: done — verificationState=${enc.verificationState()}, backupState=${enc.backupState()}, recoveryState=${enc.recoveryState()}")
     }
 
     suspend fun getEncryptionStatus(): Map<String, Any?> {
+        Log.d(TAG, "getEncryptionStatus: client=${client != null}")
         val c = client ?: throw MatrixBridgeError.NotLoggedIn()
         val enc = c.encryption()
         val vState = enc.verificationState()
         val backupState = enc.backupState()
         val recoveryState = enc.recoveryState()
+        Log.d(TAG, "getEncryptionStatus: verification=$vState, backup=$backupState, recovery=$recoveryState")
 
         val isVerified = vState == org.matrix.rustcomponents.sdk.VerificationState.VERIFIED
         val isBackupEnabled = backupState == org.matrix.rustcomponents.sdk.BackupState.ENABLED ||
@@ -1301,11 +1385,17 @@ class CapMatrix(private val context: Context) {
 
     suspend fun isRecoveryEnabled(): Boolean {
         val c = client ?: throw MatrixBridgeError.NotLoggedIn()
-        return c.encryption().recoveryState() == org.matrix.rustcomponents.sdk.RecoveryState.ENABLED
+        val state = c.encryption().recoveryState()
+        Log.d(TAG, "isRecoveryEnabled: recoveryState=$state")
+        return state == org.matrix.rustcomponents.sdk.RecoveryState.ENABLED
     }
 
     suspend fun recoverAndSetup(recoveryKey: String?, passphrase: String?) {
         val c = client ?: throw MatrixBridgeError.NotLoggedIn()
+        Log.d(TAG, "recoverAndSetup: hasRecoveryKey=${recoveryKey != null}, hasPassphrase=${passphrase != null}")
+
+        val enc = c.encryption()
+        Log.d(TAG, "recoverAndSetup: BEFORE — verification=${enc.verificationState()}, backup=${enc.backupState()}, recovery=${enc.recoveryState()}")
 
         val key: String = when {
             recoveryKey != null -> recoveryKey
@@ -1313,13 +1403,17 @@ class CapMatrix(private val context: Context) {
             else -> throw MatrixBridgeError.MissingParameter("recoveryKey or passphrase")
         }
 
-        val enc = c.encryption()
+        Log.d(TAG, "recoverAndSetup: calling enc.recover()…")
         enc.recover(key)
+        Log.d(TAG, "recoverAndSetup: recover() done, waiting for E2EE tasks…")
         enc.waitForE2eeInitializationTasks()
+        Log.d(TAG, "recoverAndSetup: AFTER — verification=${enc.verificationState()}, backup=${enc.backupState()}, recovery=${enc.recoveryState()}")
 
         if (enc.backupState() != org.matrix.rustcomponents.sdk.BackupState.ENABLED) {
+            Log.d(TAG, "recoverAndSetup: backup not enabled, calling enableBackups()…")
             try { enc.enableBackups() } catch (_: Exception) { }
         }
+        Log.d(TAG, "recoverAndSetup: complete")
     }
 
     // ── Passphrase -> recovery key derivation ────────────────────────────
@@ -2103,7 +2197,7 @@ private class TimelineItemCollector(private val roomId: String) : TimelineListen
 // ── Errors ───────────────────────────────────────────────────────────────
 
 sealed class MatrixBridgeError(message: String) : Exception(message) {
-    class NotLoggedIn : MatrixBridgeError("Not logged in. Call login() or loginWithToken() first.")
+    class NotLoggedIn : MatrixBridgeError("Not logged in. Call login() or jwtLogin() first.")
     class RoomNotFound(roomId: String) : MatrixBridgeError("Room $roomId not found")
     class NotSupported(method: String) : MatrixBridgeError("$method is not supported in this version of the Matrix SDK")
     class MissingParameter(name: String) : MatrixBridgeError("Missing required parameter: $name")

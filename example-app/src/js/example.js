@@ -177,34 +177,28 @@ window.doLogin = async () => {
   }
 };
 
-window.doLoginWithToken = async () => {
+window.doJwtLogin = async () => {
   const homeserverUrl = document.getElementById('homeserverUrl').value.trim();
-  const userId = document.getElementById('userId').value.trim();
-  const accessToken = document.getElementById('accessToken').value.trim();
-  const deviceId = document.getElementById('deviceId').value.trim();
+  const token = document.getElementById('jwtToken').value.trim();
 
-  if (!homeserverUrl || !userId || !accessToken || !deviceId) {
-    return log('Fill in all token login fields', 'error');
+  if (!homeserverUrl || !token) {
+    return log('Fill in homeserver URL and JWT token', 'error');
   }
 
-  await clearStaleDataIfUserChanged(userId);
-
-  log('Logging in with token...');
+  log('Logging in with JWT...');
   try {
-    const session = await Matrix.loginWithToken({
+    const session = await Matrix.jwtLogin({
       homeserverUrl,
-      accessToken,
-      userId,
-      deviceId,
+      token,
     });
     currentUserId = session.userId;
     localStorage.setItem('lastMatrixUserId', session.userId);
-    logResult('Token login success', session);
+    logResult('JWT login success', session);
     setStatus(`Logged in as ${session.userId}`, 'connected');
     showApp();
     await startSyncAndLoadRooms();
   } catch (e) {
-    logError('Token login', e);
+    logError('JWT login', e);
   }
 };
 
@@ -712,21 +706,10 @@ window.doModalRecover = async () => {
       _recoveryClearAttempted = true;
       log('Backup key mismatch — clearing stale local state and retrying...', 'event');
       try {
-        const session = await Matrix.getSession();
         await Matrix.clearAllData();
         localStorage.removeItem('lastMatrixUserId');
-        await Matrix.loginWithToken({
-          homeserverUrl: session.homeserverUrl,
-          accessToken: session.accessToken,
-          userId: session.userId,
-          deviceId: session.deviceId,
-        });
-        localStorage.setItem('lastMatrixUserId', session.userId);
-        await Matrix.initializeCrypto();
-        // Re-show the recover modal — crypto state is now clean from the server
-        showRecoverModal();
-        const inputEl = document.getElementById('modalRecoveryInput');
-        if (inputEl) inputEl.value = input; // preserve what they typed
+        log('Local state cleared — please log in again with a fresh JWT', 'error');
+        showRecoverErrorModal('Local state cleared. Please log in again.');
       } catch (retryErr) {
         logError('recover-clear-retry', retryErr);
         showRecoverErrorModal(msg);
@@ -1852,15 +1835,8 @@ log('Matrix plugin test app loaded');
       log(`Restoring session: ${session.userId}`, 'success');
       document.getElementById('homeserverUrl').value = session.homeserverUrl || '';
       document.getElementById('userId').value = session.userId || '';
-      await Matrix.loginWithToken({
-        homeserverUrl: session.homeserverUrl,
-        accessToken: session.accessToken,
-        userId: session.userId,
-        deviceId: session.deviceId,
-      });
-      setStatus(`Logged in as ${session.userId}`, 'connected');
-      showApp();
-      await startSyncAndLoadRooms();
+      log('Session found — please log in with a fresh JWT to restore', 'event');
+      setStatus(`Session found for ${session.userId} — re-login required`, 'disconnected');
     }
   } catch (e) {
     const msg = e?.message || String(e);

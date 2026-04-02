@@ -149,37 +149,36 @@ describe('login', () => {
   });
 });
 
-describe('loginWithToken', () => {
-  it('creates client directly with provided credentials', async () => {
-    const result = await plugin.loginWithToken({
+describe('jwtLogin', () => {
+  it('exchanges JWT and creates client with returned credentials', async () => {
+    const result = await plugin.jwtLogin({
       homeserverUrl: 'https://matrix.test',
-      accessToken: 'my-token',
-      userId: '@bob:localhost',
-      deviceId: 'DEV123',
+      token: 'my-jwt',
     });
 
+    // First createClient is the temp client for loginRequest
+    expect(createClient).toHaveBeenCalledWith({ baseUrl: 'https://matrix.test' });
+    // Second createClient is the authenticated client
     expect(createClient).toHaveBeenCalledWith(
       expect.objectContaining({
         baseUrl: 'https://matrix.test',
-        accessToken: 'my-token',
-        userId: '@bob:localhost',
-        deviceId: 'DEV123',
+        accessToken: 'mock-token',
+        userId: '@test:localhost',
+        deviceId: 'MOCK_DEVICE',
       }),
     );
-    expect(result.accessToken).toBe('my-token');
-    expect(result.userId).toBe('@bob:localhost');
+    expect(result.accessToken).toBe('mock-token');
+    expect(result.userId).toBe('@test:localhost');
   });
 
   it('persists session to localStorage', async () => {
-    await plugin.loginWithToken({
+    await plugin.jwtLogin({
       homeserverUrl: 'https://matrix.test',
-      accessToken: 'my-token',
-      userId: '@bob:localhost',
-      deviceId: 'DEV123',
+      token: 'my-jwt',
     });
 
     const stored = JSON.parse(localStorage.getItem('matrix_session')!);
-    expect(stored.accessToken).toBe('my-token');
+    expect(stored.accessToken).toBe('mock-token');
   });
 });
 

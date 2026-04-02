@@ -8,11 +8,9 @@ export interface LoginOptions {
   password: string;
 }
 
-export interface LoginWithTokenOptions {
+export interface JwtLoginOptions {
   homeserverUrl: string;
-  accessToken: string;
-  userId: string;
-  deviceId: string;
+  token: string;
 }
 
 export interface SessionInfo {
@@ -258,7 +256,7 @@ export interface RoomUpdatedEvent {
 export interface MatrixPlugin {
   // Auth
   login(options: LoginOptions): Promise<SessionInfo>;
-  loginWithToken(options: LoginWithTokenOptions): Promise<SessionInfo>;
+  jwtLogin(options: JwtLoginOptions): Promise<SessionInfo>;
   logout(): Promise<void>;
   getSession(): Promise<SessionInfo | null>;
 

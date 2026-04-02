@@ -40,7 +40,7 @@ class MatrixSDKBridge {
     private let paginatingLock = NSLock()
     // Per-room tracking of the oldest event ID returned to JS, used for pagination cursor
     private var oldestReturnedEventId: [String: String] = [:]
-    // Set on session restore (loginWithToken) to filter out rooms that are cached as
+    // Set on session restore (jwtLogin) to filter out rooms that are cached as
     // joined locally but are no longer joined according to the server.  Tuwunel's
     // sliding sync does not push explicit leave events on resume, so without this
     // reconciliation those rooms would stay in the list indefinitely.
@@ -92,21 +92,73 @@ class MatrixSDKBridge {
         return info.toDictionary()
     }
 
-    func loginWithToken(homeserverUrl: String, accessToken: String, userId: String, deviceId: String) async throws -> [String: String] {
+    func jwtLogin(homeserverUrl: String, token: String) async throws -> [String: String] {
         do {
-            return try await _loginWithToken(homeserverUrl: homeserverUrl, accessToken: accessToken, userId: userId, deviceId: deviceId)
+            return try await _jwtLogin(homeserverUrl: homeserverUrl, token: token)
         } catch {
             // If crypto store has mismatched account, wipe and retry
             if "\(error)".contains("account in the store") {
                 print("[CapMatrix] Crypto store mismatch — clearing data and retrying login")
                 await clearAllData()
-                return try await _loginWithToken(homeserverUrl: homeserverUrl, accessToken: accessToken, userId: userId, deviceId: deviceId)
+                return try await _jwtLogin(homeserverUrl: homeserverUrl, token: token)
             }
             throw error
         }
     }
 
-    private func _loginWithToken(homeserverUrl: String, accessToken: String, userId: String, deviceId: String) async throws -> [String: String] {
+    private struct MatrixCredentials {
+        let accessToken: String
+        let userId: String
+        let deviceId: String
+    }
+
+    private func _jwtLogin(homeserverUrl: String, token: String) async throws -> [String: String] {
+        let creds = try await exchangeJwtForCredentials(homeserverUrl: homeserverUrl, token: token)
+        return try await _restoreWithCredentials(
+            homeserverUrl: homeserverUrl,
+            accessToken: creds.accessToken,
+            userId: creds.userId,
+            deviceId: creds.deviceId
+        )
+    }
+
+    private func exchangeJwtForCredentials(homeserverUrl: String, token: String) async throws -> MatrixCredentials {
+        let baseUrl = homeserverUrl.hasSuffix("/") ? String(homeserverUrl.dropLast()) : homeserverUrl
+        guard let url = URL(string: "\(baseUrl)/_matrix/client/v3/login") else {
+            throw MatrixBridgeError.custom("Invalid homeserver URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+
+        let payload: [String: Any] = [
+            "type": "org.matrix.login.jwt",
+            "token": token,
+            "initial_device_display_name": "Capacitor Matrix Plugin"
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MatrixBridgeError.custom("JWT login failed: invalid response")
+        }
+        guard httpResponse.statusCode == 200 else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "unknown error"
+            throw MatrixBridgeError.custom("JWT login failed (HTTP \(httpResponse.statusCode)): \(errorBody)")
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = json["access_token"] as? String,
+              let userId = json["user_id"] as? String,
+              let deviceId = json["device_id"] as? String else {
+            throw MatrixBridgeError.custom("JWT login failed: missing fields in response")
+        }
+
+        return MatrixCredentials(accessToken: accessToken, userId: userId, deviceId: deviceId)
+    }
+
+    private func _restoreWithCredentials(homeserverUrl: String, accessToken: String, userId: String, deviceId: String) async throws -> [String: String] {
         // Stop existing sync and clean up stale references before replacing the client
         await syncService?.stop()
         syncService = nil
@@ -147,7 +199,7 @@ class MatrixSDKBridge {
         async let serverRooms = fetchJoinedRoomIds(homeserverUrl: homeserverUrl, accessToken: accessToken)
         cachedRoomIds = Set(newClient.rooms().map { $0.id() })
         serverJoinedRoomIds = await serverRooms
-        print("[CapMatrix] _loginWithToken: cachedRooms=\(cachedRoomIds?.count ?? 0), serverJoined=\(serverJoinedRoomIds?.count ?? 0)")
+        print("[CapMatrix] _restoreWithCredentials: cachedRooms=\(cachedRoomIds?.count ?? 0), serverJoined=\(serverJoinedRoomIds?.count ?? 0)")
 
         let info = MatrixSessionInfo(
             accessToken: accessToken,
@@ -1634,7 +1686,7 @@ class MatrixSDKBridge {
 
     /// Separate cache directory for sliding sync state.
     /// Pass `clearFirst: true` only for fresh logins to wipe any previous session's data.
-    /// Session restores (loginWithToken, updateAccessToken) preserve the cache so the
+    /// Session restores (jwtLogin, updateAccessToken) preserve the cache so the
     /// Rust SDK resumes incrementally; stale left rooms are filtered by membership check
     /// in getRooms() and subscribeToRoomTimelines() rather than by clearing the cache.
     private static func cacheDirectory(clearFirst: Bool = false) -> String {
@@ -2232,7 +2284,7 @@ enum MatrixBridgeError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notLoggedIn:
-            return "Not logged in. Call login() or loginWithToken() first."
+            return "Not logged in. Call login() or jwtLogin() first."
         case .roomNotFound(let roomId):
             return "Room \(roomId) not found"
         case .notSupported(let method):

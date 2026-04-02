@@ -1285,11 +1285,9 @@
         </div>
 
         <div id="tokenAuth" class="hidden">
-          <label>Access Token</label>
-          <input type="text" id="accessToken" placeholder="Access token" />
-          <label>Device ID</label>
-          <input type="text" id="deviceId" placeholder="Device ID" />
-          <button class="login-btn" onclick="doLoginWithToken()">Sign In with Token</button>
+          <label>JWT Token</label>
+          <input type="text" id="jwtToken" placeholder="JWT token (e.g. Keycloak ID token)" />
+          <button class="login-btn" onclick="doJwtLogin()">Sign In with JWT</button>
         </div>
 
         <div class="login-toggle">

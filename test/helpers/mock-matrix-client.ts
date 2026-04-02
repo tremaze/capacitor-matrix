@@ -23,6 +23,11 @@ export function createMockMatrixClient() {
       user_id: '@test:localhost',
       device_id: 'MOCK_DEVICE',
     }),
+    loginRequest: vi.fn().mockResolvedValue({
+      access_token: 'mock-token',
+      user_id: '@test:localhost',
+      device_id: 'MOCK_DEVICE',
+    }),
     logout: vi.fn().mockResolvedValue(undefined),
     stopClient: vi.fn(),
     startClient: vi.fn().mockResolvedValue(undefined),
