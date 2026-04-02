@@ -2145,6 +2145,16 @@ private class LiveTimelineListener(
     // Persists across diff batches so we never regress.
     private var watermarkTs: Long = -1
     private var watermarkReadBy: List<String>? = null
+    // EventIds confirmed read via receiptSync.  Survives SDK re-emissions
+    // (Remove+PushBack) that would otherwise overwrite the "read" status.
+    private val confirmedReadEventIds = Collections.synchronizedSet(
+        object : LinkedHashSet<String>() {
+            override fun add(element: String): Boolean {
+                if (size >= 200) iterator().let { it.next(); it.remove() }
+                return super.add(element)
+            }
+        }
+    )
     // Track own "sent" events so we can re-emit them as "read" when a receipt
     // arrives via receiptSync (which runs ahead of the SDK's timeline updates).
     private val emittedOwnSent = Collections.synchronizedMap(
@@ -2174,6 +2184,7 @@ private class LiveTimelineListener(
      * update the watermark and re-emit the event as "read" directly.
      */
     fun onExternalReceipt(eventId: String, userId: String) {
+        confirmedReadEventIds.add(eventId)
         val receiptEvt = emittedOwnSent[eventId]
         if (receiptEvt != null) {
             val ts = receiptEvt["originServerTs"] as? Long ?: return
@@ -2187,9 +2198,10 @@ private class LiveTimelineListener(
         if (watermarkTs < 0) return
         val iter = emittedOwnSent.entries.iterator()
         while (iter.hasNext()) {
-            val (_, evt) = iter.next()
+            val (id, evt) = iter.next()
             val evtTs = evt["originServerTs"] as? Long ?: continue
             if (evtTs <= watermarkTs) {
+                confirmedReadEventIds.add(id)
                 evt["status"] = "read"
                 evt["readBy"] = rb
                 onMessage(evt)
@@ -2246,12 +2258,21 @@ private class LiveTimelineListener(
         }
     }
 
-    /** If this own event was sent at or before the watermark, mark it read. */
+    /** If this own event was sent at or before the watermark, or was already
+     *  confirmed read by receiptSync, mark it read. */
     private fun applyWatermarkToEvent(evt: MutableMap<String, Any?>) {
+        if (evt["senderId"] as? String != myUserId) return
         val rb = watermarkReadBy
+        // Check if this specific eventId was confirmed read by receiptSync
+        val eventId = evt["eventId"] as? String
+        if (eventId != null && eventId in confirmedReadEventIds && rb != null) {
+            evt["status"] = "read"
+            evt["readBy"] = rb
+            return
+        }
+        // Timestamp-based watermark
         if (rb == null || watermarkTs < 0) return
         val ts = evt["originServerTs"] as? Long ?: return
-        if (evt["senderId"] as? String != myUserId) return
         if (ts <= watermarkTs) {
             val existing = evt["readBy"] as? List<*>
             if (existing == null || existing.isEmpty()) {
