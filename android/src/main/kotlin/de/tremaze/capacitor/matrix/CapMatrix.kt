@@ -2,6 +2,7 @@ package de.tremaze.capacitor.matrix
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -61,6 +62,7 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 private const val TAG = "CapMatrix"
+private const val TIMING_TAG = "CapMatrixTiming"
 
 class CapMatrix(private val context: Context) {
 
@@ -654,6 +656,7 @@ class CapMatrix(private val context: Context) {
         onMessage: (Map<String, Any?>) -> Unit,
         onRoomUpdate: (String, Map<String, Any?>) -> Unit
     ) {
+        val tStart = SystemClock.elapsedRealtime()
         val c = client ?: return
         val rooms = c.rooms()
 
@@ -688,18 +691,24 @@ class CapMatrix(private val context: Context) {
                 Log.d(TAG, "  room $roomId: FAILED: ${e.message}")
             }
         }
+        val subscribeElapsed = SystemClock.elapsedRealtime() - tStart
+        Log.d(TIMING_TAG, "subscribeToRoomTimelines: ${roomsToSubscribe.size} rooms subscribed in ${subscribeElapsed}ms")
 
         // Preload messages for all rooms in the background
+        val preloadStart = SystemClock.elapsedRealtime()
         for ((_, roomId) in roomsToSubscribe) {
             scope.launch {
                 val timeline = roomTimelines[roomId] ?: return@launch
                 try {
+                    val t0 = SystemClock.elapsedRealtime()
                     timeline.paginateBackwards(30u)
+                    Log.d(TIMING_TAG, "subscribeToRoomTimelines: preload $roomId took ${SystemClock.elapsedRealtime() - t0}ms")
                 } catch (e: Exception) {
                     Log.d(TAG, "preload $roomId failed: ${e.message}")
                 }
             }
         }
+        Log.d(TIMING_TAG, "subscribeToRoomTimelines: total setup ${SystemClock.elapsedRealtime() - tStart}ms (preload launched async)")
     }
 
     suspend fun stopSync() {
@@ -727,9 +736,15 @@ class CapMatrix(private val context: Context) {
     private suspend fun getOrCreateTimeline(room: Room): Timeline {
         val roomId = room.id()
         synchronized(roomTimelines) {
-            roomTimelines[roomId]?.let { return it }
+            roomTimelines[roomId]?.let {
+                Log.d(TIMING_TAG, "getOrCreateTimeline[$roomId] cache HIT")
+                return it
+            }
         }
+        val t0 = SystemClock.elapsedRealtime()
         val timeline = room.timeline()
+        val elapsed = SystemClock.elapsedRealtime() - t0
+        Log.d(TIMING_TAG, "getOrCreateTimeline[$roomId] cache MISS — room.timeline() took ${elapsed}ms")
         synchronized(roomTimelines) {
             // Double-check: another coroutine may have created it while we awaited
             roomTimelines[roomId]?.let { return it }
@@ -921,19 +936,36 @@ class CapMatrix(private val context: Context) {
     }
 
     suspend fun getRoomMessages(roomId: String, limit: Int, from: String?): Map<String, Any?> {
+        val tStart = SystemClock.elapsedRealtime()
+        var tPrev = tStart
+        fun logTiming(checkpoint: String, count: Int? = null) {
+            val now = SystemClock.elapsedRealtime()
+            val delta = now - tPrev
+            val total = now - tStart
+            val countStr = if (count != null) " [count=$count]" else ""
+            Log.d(TIMING_TAG, "getRoomMessages[$roomId] $checkpoint +${delta}ms (total ${total}ms)$countStr")
+            tPrev = now
+        }
+        logTiming("start")
+
         val room = requireRoom(roomId)
+        logTiming("requireRoom")
+
         val timeline = getOrCreateTimeline(room)
+        logTiming("getOrCreateTimeline")
 
         // Suppress live listener while we paginate
         synchronized(paginatingRooms) { paginatingRooms.add(roomId) }
 
         val collector = TimelineItemCollector(roomId)
         val handle = timeline.addListener(collector)
+        logTiming("addListener")
 
         var hitStart = false
         // Wait for the initial Reset snapshot before paginating
         val gotInitial = collector.waitForUpdate(5000)
         val countBefore = collector.events.size
+        logTiming("waitInitial", countBefore)
         val isPagination = from != null
 
         // Reset cursor on initial load
@@ -945,13 +977,18 @@ class CapMatrix(private val context: Context) {
         if (isPagination || countBefore < limit) {
             try {
                 hitStart = timeline.paginateBackwards(limit.toUShort())
+                logTiming("paginateBackwards")
 
-                // Always wait for diffs — even when hitStart=true
-                collector.waitForUpdate(5000)
+                if (!hitStart) {
+                    // More history exists — wait for the SDK to deliver diffs
+                    collector.waitForUpdate(5000)
+                    logTiming("waitPagination", collector.events.size)
+                }
             } catch (e: Exception) {
                 // Pagination failed (e.g. expired token) — fall through and
                 // return whatever events were already collected from cache.
                 Log.w(TAG, "getRoomMessages: paginateBackwards failed, returning cached events: ${e.message}")
+                logTiming("paginateBackwards(FAILED)")
                 hitStart = true
             }
         }
@@ -1014,12 +1051,16 @@ class CapMatrix(private val context: Context) {
             }
         }
 
+        logTiming("buildResponse", events.size)
+
         val nextBatch: String? = if (hitStart || events.isEmpty()) null else "more"
 
-        return mapOf(
+        val result = mapOf(
             "events" to events,
             "nextBatch" to nextBatch
         )
+        logTiming("done", events.size)
+        return result
     }
 
     suspend fun markRoomAsRead(roomId: String, eventId: String) {
@@ -1291,7 +1332,7 @@ class CapMatrix(private val context: Context) {
         }
     }
 
-    suspend fun deleteDevice(deviceId: String) {
+    suspend fun deleteDevice(deviceId: String, auth: JSONObject? = null) {
         val session = sessionStore.load() ?: throw MatrixBridgeError.NotLoggedIn()
         val baseUrl = session.homeserverUrl.trimEnd('/')
         val urlString = "$baseUrl/_matrix/client/v3/devices/$deviceId"
@@ -1303,8 +1344,15 @@ class CapMatrix(private val context: Context) {
             doOutput = true
         }
         try {
-            conn.outputStream.use { it.write("{}".toByteArray()) }
+            val body = JSONObject()
+            if (auth != null) body.put("auth", auth)
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
             val statusCode = conn.responseCode
+            if (statusCode == 401) {
+                val errorBody = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+                val uiaData = if (errorBody != null) JSONObject(errorBody) else JSONObject()
+                throw UiaRequiredException(uiaData)
+            }
             if (statusCode !in 200..299) {
                 throw MatrixBridgeError.Custom("deleteDevice failed with status $statusCode")
             }
@@ -2229,6 +2277,8 @@ sealed class MatrixBridgeError(message: String) : Exception(message) {
     class MissingParameter(name: String) : MatrixBridgeError("Missing required parameter: $name")
     class Custom(message: String) : MatrixBridgeError(message)
 }
+
+class UiaRequiredException(val data: JSONObject) : Exception("UIA required")
 
 // ── Session Store ────────────────────────────────────────────────────────
 
