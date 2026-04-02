@@ -1294,7 +1294,7 @@ class MatrixSDKBridge {
         return verifiedIds
     }
 
-    func deleteDevice(deviceId: String) async throws {
+    func deleteDevice(deviceId: String, auth: [String: Any]? = nil) async throws {
         guard let session = sessionStore.load() else {
             throw MatrixBridgeError.notLoggedIn
         }
@@ -1310,11 +1310,16 @@ class MatrixSDKBridge {
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = "{}".data(using: .utf8)
+        var body: [String: Any] = [:]
+        if let auth = auth { body["auth"] = auth }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-        // 401 means UIA is required - for now we just throw
+        if statusCode == 401 {
+            let uiaData = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            throw UiaRequiredError(data: uiaData)
+        }
         guard statusCode >= 200 && statusCode < 300 else {
             throw MatrixBridgeError.notSupported("deleteDevice failed with status \(statusCode)")
         }
@@ -2334,6 +2339,10 @@ enum MatrixBridgeError: LocalizedError {
             return message
         }
     }
+}
+
+struct UiaRequiredError: Error {
+    let data: [String: Any]
 }
 
 // MARK: - Sync Observer Proxy

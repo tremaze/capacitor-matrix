@@ -821,11 +821,14 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let deviceId = call.getString("deviceId") else {
             return call.reject("Missing deviceId")
         }
+        let auth = call.getObject("auth")
 
         Task {
             do {
-                try await matrixBridge.deleteDevice(deviceId: deviceId)
+                try await matrixBridge.deleteDevice(deviceId: deviceId, auth: auth)
                 call.resolve()
+            } catch let e as UiaRequiredError {
+                call.reject("UIA required", "UIA_REQUIRED", nil, e.data)
             } catch {
                 call.reject(error.localizedDescription)
             }

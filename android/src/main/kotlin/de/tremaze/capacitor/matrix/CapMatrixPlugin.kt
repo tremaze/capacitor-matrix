@@ -889,11 +889,14 @@ class CapMatrixPlugin : Plugin() {
     fun deleteDevice(call: PluginCall) {
         val deviceId = call.getString("deviceId")
             ?: return call.reject("Missing deviceId")
+        val auth = call.getObject("auth", null)?.let { JSONObject(it.toString()) }
 
         scope.launch {
             try {
-                matrixBridge.deleteDevice(deviceId)
+                matrixBridge.deleteDevice(deviceId, auth)
                 call.resolve()
+            } catch (e: UiaRequiredException) {
+                call.reject("UIA required", "UIA_REQUIRED", null, JSObject(e.data.toString()))
             } catch (e: Exception) {
                 call.reject(e.message ?: "deleteDevice failed", e)
             }
