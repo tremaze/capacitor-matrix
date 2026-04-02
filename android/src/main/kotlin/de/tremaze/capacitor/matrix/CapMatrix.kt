@@ -80,6 +80,10 @@ class CapMatrix(private val context: Context) {
     private val roomCreatedAtCache = Collections.synchronizedMap(mutableMapOf<String, Long>())
     @Volatile private var receiptSyncJob: Job? = null
     private val timelineListeners = Collections.synchronizedList(mutableListOf<LiveTimelineListener>())
+    private val timelineListenersByRoom = Collections.synchronizedMap(mutableMapOf<String, LiveTimelineListener>())
+    // Cache the latest non-self receipt per room from receiptSync, so getRoomMessages
+    // can use it even when the SDK's readReceipts are empty on timeline items.
+    private val latestReceiptByRoom = Collections.synchronizedMap(mutableMapOf<String, Pair<String, String>>()) // roomId -> (eventId, userId)
     @Volatile private var currentSyncState: String = "STOPPED"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val loginMutex = Mutex()
@@ -419,8 +423,20 @@ class CapMatrix(private val context: Context) {
             Log.d(TAG, "startSync: service.start() returned")
         }
 
-        // Start a parallel v2 sync connection for m.receipt and m.typing ephemeral events
-        startReceiptSync(onReceipt, onTyping)
+        // Start a parallel v2 sync connection for m.receipt and m.typing ephemeral events.
+        // When a receipt arrives, also notify the room's LiveTimelineListener so it can
+        // update its watermark — the SDK's readReceipts on timeline items may lag behind.
+        val myUserId = try { c.userId() } catch (_: Exception) { null }
+        startReceiptSync(
+            onReceipt = { roomId, eventId, userId ->
+                onReceipt(roomId, eventId, userId)
+                if (userId != myUserId) {
+                    latestReceiptByRoom[roomId] = eventId to userId
+                    timelineListenersByRoom[roomId]?.onExternalReceipt(eventId, userId)
+                }
+            },
+            onTyping = onTyping
+        )
     }
 
     private fun startReceiptSync(
@@ -679,15 +695,17 @@ class CapMatrix(private val context: Context) {
 
         if (roomsToSubscribe.isEmpty()) return
 
+        val myUserId = try { c.userId() } catch (_: Exception) { null }
         for ((room, roomId) in roomsToSubscribe) {
             try {
                 val timeline = getOrCreateTimeline(room)
-                val listener = LiveTimelineListener(roomId, room, onMessage, onRoomUpdate) {
+                val listener = LiveTimelineListener(roomId, room, myUserId, onMessage, onRoomUpdate) {
                     paginatingRooms.contains(roomId)
                 }
                 val handle = timeline.addListener(listener)
                 timelineListenerHandles.add(handle)
                 timelineListeners.add(listener)
+                timelineListenersByRoom[roomId] = listener
                 Log.d(TAG, "  room $roomId: listener added")
             } catch (e: Exception) {
                 subscribedRoomIds.remove(roomId)
@@ -1089,6 +1107,30 @@ class CapMatrix(private val context: Context) {
                 }
             }
         }
+
+        // Apply cached receiptSync receipt as a second watermark pass.
+        // The SDK's readReceipts may be empty for the latest event, but
+        // receiptSync already received the receipt in a previous sync cycle.
+        latestReceiptByRoom[roomId]?.let { (receiptEventId, receiptUserId) ->
+            val receiptEvt = events.firstOrNull { it["eventId"] == receiptEventId }
+            val receiptTs = receiptEvt?.get("originServerTs") as? Long
+            if (receiptTs != null) {
+                for (evt in events) {
+                    val ts = evt["originServerTs"] as? Long ?: continue
+                    if (ts <= receiptTs && evt["senderId"] as? String == myUserId) {
+                        val existing = evt["readBy"] as? List<*>
+                        if (existing == null || existing.isEmpty()) {
+                            evt["status"] = "read"
+                            evt["readBy"] = listOf(receiptUserId)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Feed own "sent" events into the listener's tracking so that
+        // receiptSync can re-emit them as "read" when a receipt arrives.
+        timelineListenersByRoom[roomId]?.trackEvents(events)
 
         logTiming("buildResponse", events.size)
 
@@ -1788,6 +1830,7 @@ class CapMatrix(private val context: Context) {
             }
             timelineListeners.clear()
         }
+        timelineListenersByRoom.clear()
     }
 
     fun destroy() {
@@ -2061,8 +2104,6 @@ private fun serializeEventTimelineItem(eventItem: EventTimelineItem, roomId: Str
             readBy = others
         }
     }
-    Log.d(TAG, "serializeEvent: eventId=$eventId sender=${eventItem.sender} receiptKeys=${receipts.keys.toList()} status=$status readBy=$readBy")
-
     // Build unsigned dict — include transaction_id when available
     var unsignedDict: Map<String, Any?>? = null
     if (eventItem.eventOrTransactionId is EventOrTransactionId.TransactionId) {
@@ -2093,12 +2134,24 @@ private fun serializeEventTimelineItem(eventItem: EventTimelineItem, roomId: Str
 private class LiveTimelineListener(
     private val roomId: String,
     private val room: Room,
+    private val myUserId: String?,
     private val onMessage: (Map<String, Any?>) -> Unit,
     private val onRoomUpdate: (String, Map<String, Any?>) -> Unit,
     private val isPaginating: () -> Boolean
 ) : TimelineListener {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Timestamp-based read watermark.  "Someone read up to this timestamp."
+    // Persists across diff batches so we never regress.
+    private var watermarkTs: Long = -1
+    private var watermarkReadBy: List<String>? = null
+    // Track own "sent" events so we can re-emit them as "read" when a receipt
+    // arrives via receiptSync (which runs ahead of the SDK's timeline updates).
+    private val emittedOwnSent = Collections.synchronizedMap(
+        object : LinkedHashMap<String, MutableMap<String, Any?>>() {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutableMap<String, Any?>>?) = size > 50
+        }
+    )
     // Coalesce rapid room updates: only one in-flight serialization at a time,
     // and at most one pending re-serialization queued behind it.
     @Volatile private var roomUpdatePending = false
@@ -2106,6 +2159,43 @@ private class LiveTimelineListener(
 
     fun cancel() {
         scope.cancel()
+    }
+
+    /** Track events from getRoomMessages so onExternalReceipt can find them. */
+    fun trackEvents(events: List<MutableMap<String, Any?>>) {
+        for (evt in events) {
+            trackOwnSent(evt)
+        }
+    }
+
+    /**
+     * Called from receiptSync when a receipt arrives from another user.
+     * The SDK's timeline readReceipts may not reflect this yet, so we
+     * update the watermark and re-emit the event as "read" directly.
+     */
+    fun onExternalReceipt(eventId: String, userId: String) {
+        val receiptEvt = emittedOwnSent[eventId]
+        if (receiptEvt != null) {
+            val ts = receiptEvt["originServerTs"] as? Long ?: return
+            if (ts > watermarkTs) {
+                watermarkTs = ts
+                watermarkReadBy = listOf(userId)
+            }
+        }
+        // Re-emit ALL tracked own events at or below the watermark as read
+        val rb = watermarkReadBy ?: return
+        if (watermarkTs < 0) return
+        val iter = emittedOwnSent.entries.iterator()
+        while (iter.hasNext()) {
+            val (_, evt) = iter.next()
+            val evtTs = evt["originServerTs"] as? Long ?: continue
+            if (evtTs <= watermarkTs) {
+                evt["status"] = "read"
+                evt["readBy"] = rb
+                onMessage(evt)
+                iter.remove()
+            }
+        }
     }
 
     private fun emitRoomUpdate() {
@@ -2135,72 +2225,146 @@ private class LiveTimelineListener(
         }
     }
 
+    /** Check raw readReceipts for non-self users; advance the watermark if newer. */
+    private fun updateWatermarkFromItem(item: TimelineItem) {
+        val eventItem = item.asEvent() ?: return
+        if (myUserId == null) return
+        val allReceipts = eventItem.readReceipts
+        val others = allReceipts.keys.filter { it != myUserId }
+        if (others.isNotEmpty()) {
+            val ts = eventItem.timestamp.toLong()
+            val eventId = extractEventId(eventItem.eventOrTransactionId)
+            Log.d(TAG, "updateWatermark: eventId=$eventId sender=${eventItem.sender} ts=$ts receipts=$others (prev watermarkTs=$watermarkTs)")
+            if (ts > watermarkTs) {
+                watermarkTs = ts
+                watermarkReadBy = others
+            }
+        } else if (allReceipts.isNotEmpty()) {
+            // Receipt exists but only from self — log to see if the SDK received it
+            val eventId = extractEventId(eventItem.eventOrTransactionId)
+            Log.d(TAG, "updateWatermark: eventId=$eventId selfReceiptOnly keys=${allReceipts.keys.toList()}")
+        }
+    }
+
+    /** If this own event was sent at or before the watermark, mark it read. */
+    private fun applyWatermarkToEvent(evt: MutableMap<String, Any?>) {
+        val rb = watermarkReadBy
+        if (rb == null || watermarkTs < 0) return
+        val ts = evt["originServerTs"] as? Long ?: return
+        if (evt["senderId"] as? String != myUserId) return
+        if (ts <= watermarkTs) {
+            val existing = evt["readBy"] as? List<*>
+            if (existing == null || existing.isEmpty()) {
+                evt["status"] = "read"
+                evt["readBy"] = rb
+            }
+        }
+    }
+
+    /** Serialize, apply watermark, track, emit. */
+    private fun serializeAndEmit(item: TimelineItem) {
+        serializeTimelineItem(item, roomId)?.toMutableMap()?.let { evt ->
+            applyWatermarkToEvent(evt)
+            trackOwnSent(evt)
+            onMessage(evt)
+        }
+    }
+
+    private fun trackOwnSent(evt: MutableMap<String, Any?>) {
+        val eventId = evt["eventId"] as? String ?: return
+        if (evt["senderId"] as? String == myUserId) {
+            if (evt["status"] == "sent") {
+                emittedOwnSent[eventId] = evt
+            } else {
+                emittedOwnSent.remove(eventId)
+            }
+        }
+    }
+
+    private fun dumpTimelineItem(label: String, item: TimelineItem, index: Int? = null) {
+        val eventItem = item.asEvent()
+        if (eventItem == null) {
+            Log.d(TAG, "  $label:${if (index != null) " idx=$index" else ""} (virtual/non-event)")
+            return
+        }
+        val eventId = extractEventId(eventItem.eventOrTransactionId)
+        val isLocalEcho = eventItem.eventOrTransactionId is EventOrTransactionId.TransactionId
+        val allReceipts = eventItem.readReceipts.keys.toList()
+        val sendState = eventItem.localSendState
+        Log.d(TAG, "  $label:${if (index != null) " idx=$index" else ""} eventId=$eventId sender=${eventItem.sender} ts=${eventItem.timestamp.toLong()} receipts=$allReceipts localEcho=$isLocalEcho sendState=$sendState")
+    }
+
     override fun onUpdate(diff: List<TimelineDiff>) {
         if (isPaginating()) return
-        Log.d(TAG, "LiveTimelineListener onUpdate for $roomId: ${diff.size} diffs")
+        Log.d(TAG, "onUpdate[$roomId]: ${diff.size} diffs, types=${diff.map { it::class.simpleName }}")
         var needsRoomUpdate = false
+        val setItems = mutableListOf<TimelineItem>()
         for (d in diff) {
             when (d) {
                 is TimelineDiff.Reset -> {
-                    Log.d(TAG, "  Reset: ${d.values.size} items")
-                    d.values.forEach { item ->
-                        serializeTimelineItem(item, roomId)?.let { event ->
-                            onMessage(event)
-                        }
-                    }
+                    Log.d(TAG, "  Reset: ${d.values.size} items (clearing watermark from ts=$watermarkTs readBy=$watermarkReadBy)")
+                    watermarkTs = -1
+                    watermarkReadBy = null
+                    d.values.forEach { updateWatermarkFromItem(it) }
+                    Log.d(TAG, "  Reset after scan: watermarkTs=$watermarkTs readBy=$watermarkReadBy")
+                    d.values.forEach { serializeAndEmit(it) }
                     needsRoomUpdate = true
                 }
                 is TimelineDiff.Append -> {
-                    Log.d(TAG, "  Append: ${d.values.size} items")
-                    d.values.forEach { item ->
-                        serializeTimelineItem(item, roomId)?.let { event ->
-                            onMessage(event)
-                        }
-                    }
+                    Log.d(TAG, "  Append: ${d.values.size} items (watermarkTs=$watermarkTs readBy=$watermarkReadBy)")
+                    d.values.forEach { updateWatermarkFromItem(it) }
+                    Log.d(TAG, "  Append after scan: watermarkTs=$watermarkTs readBy=$watermarkReadBy")
+                    d.values.forEach { serializeAndEmit(it) }
                     needsRoomUpdate = true
                 }
                 is TimelineDiff.PushBack -> {
+                    dumpTimelineItem("PushBack", d.value)
                     val eventItem = d.value.asEvent()
                     var skipLocalEcho = false
                     if (eventItem != null && eventItem.eventOrTransactionId is EventOrTransactionId.TransactionId) {
                         skipLocalEcho = true
                     }
-                    Log.d(TAG, "  PushBack: localEcho=$skipLocalEcho")
                     if (!skipLocalEcho) {
-                        serializeTimelineItem(d.value, roomId)?.let { event ->
-                            onMessage(event)
-                        }
+                        updateWatermarkFromItem(d.value)
+                        serializeAndEmit(d.value)
                     }
                     needsRoomUpdate = true
                 }
                 is TimelineDiff.PushFront -> {
-                    serializeTimelineItem(d.value, roomId)?.let { event ->
-                        onMessage(event)
-                    }
+                    dumpTimelineItem("PushFront", d.value)
+                    updateWatermarkFromItem(d.value)
+                    serializeAndEmit(d.value)
                 }
                 is TimelineDiff.Set -> {
-                    serializeTimelineItem(d.value, roomId)?.let { event ->
-                        Log.d(TAG, "  Set: idx=${d.index} eventId=${event["eventId"]} sender=${event["senderId"]} status=${event["status"]} readBy=${event["readBy"]}")
-                        onMessage(event)
-                        val rb = event["readBy"] as? List<*>
-                        if (rb != null && rb.isNotEmpty()) {
-                            needsRoomUpdate = true
-                        }
-                    }
+                    dumpTimelineItem("Set", d.value, d.index.toInt())
+                    setItems.add(d.value)
                 }
                 is TimelineDiff.Insert -> {
-                    serializeTimelineItem(d.value, roomId)?.let { event ->
-                        onMessage(event)
-                    }
+                    dumpTimelineItem("Insert", d.value, d.index.toInt())
+                    updateWatermarkFromItem(d.value)
+                    serializeAndEmit(d.value)
                     needsRoomUpdate = true
                 }
                 is TimelineDiff.Remove -> {
-                    // Index-based removal, handled by JS layer
+                    Log.d(TAG, "  Remove: idx=${d.index}")
                 }
-                else -> { }
+                else -> {
+                    Log.d(TAG, "  Other: ${d::class.simpleName}")
+                }
             }
         }
-        // Emit a single coalesced room update for the entire diff batch
+        if (setItems.isNotEmpty()) {
+            setItems.forEach { updateWatermarkFromItem(it) }
+            for (item in setItems) {
+                serializeTimelineItem(item, roomId)?.toMutableMap()?.let { evt ->
+                    applyWatermarkToEvent(evt)
+                    trackOwnSent(evt)
+                    onMessage(evt)
+                    val rb = evt["readBy"] as? List<*>
+                    if (rb != null && rb.isNotEmpty()) needsRoomUpdate = true
+                }
+            }
+        }
         if (needsRoomUpdate) {
             emitRoomUpdate()
         }
