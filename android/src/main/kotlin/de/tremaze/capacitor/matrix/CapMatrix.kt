@@ -84,6 +84,7 @@ class CapMatrix(private val context: Context) {
     // Cache the latest non-self receipt per room from receiptSync, so getRoomMessages
     // can use it even when the SDK's readReceipts are empty on timeline items.
     private val latestReceiptByRoom = Collections.synchronizedMap(mutableMapOf<String, Pair<String, String>>()) // roomId -> (eventId, userId)
+    private val emittedInviteRoomIds = Collections.synchronizedSet(mutableSetOf<String>())
     @Volatile private var currentSyncState: String = "STOPPED"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val loginMutex = Mutex()
@@ -435,13 +436,15 @@ class CapMatrix(private val context: Context) {
                     timelineListenersByRoom[roomId]?.onExternalReceipt(eventId, userId)
                 }
             },
-            onTyping = onTyping
+            onTyping = onTyping,
+            onRoomUpdate = onRoomUpdate
         )
     }
 
     private fun startReceiptSync(
         onReceipt: (roomId: String, eventId: String, userId: String) -> Unit,
-        onTyping: (roomId: String, userIds: List<String>) -> Unit
+        onTyping: (roomId: String, userIds: List<String>) -> Unit,
+        onRoomUpdate: (String, Map<String, Any?>) -> Unit
     ) {
         val session = sessionStore.load() ?: return
 
@@ -536,6 +539,9 @@ class CapMatrix(private val context: Context) {
 
                         processReceiptResponse(json, onReceipt)
                         processTypingResponse(json, onTyping)
+
+                        // Check for new rooms (invites, joins from other devices)
+                        checkForNewRooms(onRoomUpdate)
                     } finally {
                         conn.disconnect()
                     }
@@ -732,6 +738,29 @@ class CapMatrix(private val context: Context) {
         Log.d(TIMING_TAG, "subscribeToRoomTimelines: total setup ${SystemClock.elapsedRealtime() - tStart}ms (preload launched async)")
     }
 
+    /** Check for new rooms (invites, joins from other devices) and emit roomUpdated. */
+    private suspend fun checkForNewRooms(onRoomUpdate: (String, Map<String, Any?>) -> Unit) {
+        val c = client ?: return
+        for (room in c.rooms()) {
+            val roomId = room.id()
+            val mem = room.membership()
+            if (mem == Membership.INVITED && roomId !in emittedInviteRoomIds) {
+                emittedInviteRoomIds.add(roomId)
+                try {
+                    val summary = serializeRoom(room)
+                    Log.d(TAG, "checkForNewRooms: new invite $roomId")
+                    onRoomUpdate(roomId, summary)
+                } catch (_: Exception) { }
+            } else if (mem == Membership.JOINED && roomId !in subscribedRoomIds) {
+                try {
+                    val summary = serializeRoom(room)
+                    Log.d(TAG, "checkForNewRooms: new joined room $roomId")
+                    onRoomUpdate(roomId, summary)
+                } catch (_: Exception) { }
+            }
+        }
+    }
+
     suspend fun stopSync() {
         syncService?.stop()
         syncService = null
@@ -740,6 +769,7 @@ class CapMatrix(private val context: Context) {
         subscribedRoomIds.clear()
         timelineListenerHandles.clear()
         roomTimelines.clear()
+        emittedInviteRoomIds.clear()
         receiptSyncJob?.cancel()
         receiptSyncJob = null
     }
@@ -798,8 +828,11 @@ class CapMatrix(private val context: Context) {
             val serialized = mutableListOf<MutableMap<String, Any?>>()
             val needCreatedAt = mutableListOf<String>()
             for (room in rooms) {
-                if (room.membership() != Membership.JOINED) continue
-                if (isStaleRoom(room.id())) continue
+                val mem = room.membership()
+                if (mem != Membership.JOINED && mem != Membership.INVITED) continue
+                // Only apply stale-room check to joined rooms — invited rooms
+                // won't appear in /joined_rooms and must not be filtered out.
+                if (mem == Membership.JOINED && isStaleRoom(room.id())) continue
                 try {
                     val dict = serializeRoom(room).toMutableMap()
                     if (dict["lastEventTs"] == null) {
@@ -925,7 +958,10 @@ class CapMatrix(private val context: Context) {
     suspend fun joinRoom(roomIdOrAlias: String): String {
         val c = client ?: throw MatrixBridgeError.NotLoggedIn()
         val room = c.joinRoomByIdOrAlias(roomIdOrAlias, emptyList())
-        return room.id()
+        val roomId = room.id()
+        // Update stale-room bookkeeping so the freshly joined room isn't filtered out
+        serverJoinedRoomIds = serverJoinedRoomIds?.plus(roomId)
+        return roomId
     }
 
     suspend fun leaveRoom(roomId: String) {
