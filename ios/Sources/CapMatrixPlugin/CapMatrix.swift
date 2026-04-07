@@ -360,7 +360,8 @@ class MatrixSDKBridge {
         onSyncState: @escaping (String) -> Void,
         onMessage: @escaping ([String: Any]) -> Void,
         onRoomUpdate: @escaping (String, [String: Any]) -> Void,
-        onReceipt: @escaping (_ roomId: String, _ eventId: String, _ userId: String) -> Void
+        onReceipt: @escaping (_ roomId: String, _ eventId: String, _ userId: String) -> Void,
+        onTyping: @escaping (_ roomId: String, _ userIds: [String]) -> Void
     ) async throws {
         guard let c = client else {
             throw MatrixBridgeError.notLoggedIn
@@ -418,15 +419,17 @@ class MatrixSDKBridge {
                     self?.timelineListenersByRoom[roomId]?.onExternalReceipt(eventId: eventId, userId: userId)
                 }
             },
+            onTyping: onTyping,
             onRoomUpdate: onRoomUpdate
         )
     }
 
-    /// Runs a lightweight v2 sync loop that only subscribes to m.receipt
+    /// Runs a lightweight v2 sync loop that subscribes to m.receipt and m.typing
     /// ephemeral events and also checks for new rooms (invites) after each
     /// sync response.
     private func startReceiptSync(
         onReceipt: @escaping (_ roomId: String, _ eventId: String, _ userId: String) -> Void,
+        onTyping: @escaping (_ roomId: String, _ userIds: [String]) -> Void,
         onRoomUpdate: @escaping (String, [String: Any]) -> Void
     ) {
         guard let session = sessionStore.load() else { return }
@@ -478,8 +481,9 @@ class MatrixSDKBridge {
                            let nextBatch = json["next_batch"] as? String {
                             since = nextBatch
                         }
-                        // Process any receipts in the initial response
+                        // Process any receipts/typing in the initial response
                         Self.processReceiptResponse(data: data, onReceipt: onReceipt)
+                        Self.processTypingResponse(data: data, onTyping: onTyping)
                         print("[CapMatrix] receiptSync: \(apiPath) works, since=\(since ?? "nil")")
                         break
                     } else {
@@ -531,6 +535,7 @@ class MatrixSDKBridge {
                     }
 
                     Self.processReceiptResponse(data: data, onReceipt: onReceipt)
+                    Self.processTypingResponse(data: data, onTyping: onTyping)
 
                     // Check for new rooms (invites, joins from other devices)
                     await self?.checkForNewRooms(onRoomUpdate: onRoomUpdate)
@@ -560,7 +565,7 @@ class MatrixSDKBridge {
             "room": [
                 "timeline": ["limit": 0],
                 "state": ["types": [] as [String]],
-                "ephemeral": ["types": ["m.receipt"]]
+                "ephemeral": ["types": ["m.receipt", "m.typing"]]
             ],
             "presence": ["types": [] as [String]]
         ]
@@ -603,7 +608,7 @@ class MatrixSDKBridge {
             queryItems.append(URLQueryItem(name: "filter", value: fid))
         } else {
             // Inline filter as fallback
-            let inlineFilter = #"{"room":{"timeline":{"limit":0},"state":{"types":[]},"ephemeral":{"types":["m.receipt"]}},"presence":{"types":[]}}"#
+            let inlineFilter = #"{"room":{"timeline":{"limit":0},"state":{"types":[]},"ephemeral":{"types":["m.receipt","m.typing"]}},"presence":{"types":[]}}"#
             queryItems.append(URLQueryItem(name: "filter", value: inlineFilter))
         }
         if let s = since {
@@ -641,6 +646,29 @@ class MatrixSDKBridge {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Parse typing events from a v2 sync response and fire callbacks per room.
+    private static func processTypingResponse(
+        data: Data, onTyping: @escaping (_ roomId: String, _ userIds: [String]) -> Void
+    ) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rooms = (json["rooms"] as? [String: Any])?["join"] as? [String: Any] else {
+            return
+        }
+        for (roomId, roomData) in rooms {
+            guard let roomDict = roomData as? [String: Any],
+                  let ephemeral = roomDict["ephemeral"] as? [String: Any],
+                  let events = ephemeral["events"] as? [[String: Any]] else {
+                continue
+            }
+            for event in events {
+                guard (event["type"] as? String) == "m.typing",
+                      let content = event["content"] as? [String: Any],
+                      let userIds = content["user_ids"] as? [String] else { continue }
+                onTyping(roomId, userIds)
             }
         }
     }
@@ -984,11 +1012,73 @@ class MatrixSDKBridge {
 
     // MARK: - Messaging
 
-    func sendMessage(roomId: String, body: String, msgtype: String) async throws -> String {
+    func sendMessage(
+        roomId: String, body: String, msgtype: String,
+        fileUri: String? = nil, fileName: String? = nil, mimeType: String? = nil,
+        fileSize: Int? = nil, duration: Int? = nil, width: Int? = nil, height: Int? = nil
+    ) async throws -> String {
+        let mediaTypes = ["m.image", "m.audio", "m.video", "m.file"]
+        if mediaTypes.contains(msgtype), let fileUri = fileUri, let fileName = fileName, let mimeType = mimeType {
+            // Media message: upload file, then send event via CS API
+            let mxcUrl = try await uploadContent(fileUri: fileUri, fileName: fileName, mimeType: mimeType)
+            return try await sendMediaEvent(
+                roomId: roomId, body: body, msgtype: msgtype, mxcUrl: mxcUrl,
+                mimeType: mimeType, fileSize: fileSize, duration: duration, width: width, height: height
+            )
+        }
+        // Text message
         let room = try requireRoom(roomId: roomId)
         let timeline = try await getOrCreateTimeline(room: room)
         let content = messageEventContentFromMarkdown(md: body)
         try await timeline.send(msg: content)
+        return ""
+    }
+
+    private func sendMediaEvent(
+        roomId: String, body: String, msgtype: String, mxcUrl: String,
+        mimeType: String, fileSize: Int?, duration: Int?, width: Int?, height: Int?
+    ) async throws -> String {
+        guard let session = sessionStore.load() else { throw MatrixBridgeError.notLoggedIn }
+        let baseUrl = session.homeserverUrl.hasSuffix("/")
+            ? String(session.homeserverUrl.dropLast())
+            : session.homeserverUrl
+        let txnId = "m\(UInt64(Date().timeIntervalSince1970 * 1000))\(Int.random(in: 0..<100000))"
+        let encodedRoomId = roomId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? roomId
+        let urlStr = "\(baseUrl)/_matrix/client/v3/rooms/\(encodedRoomId)/send/m.room.message/\(txnId)"
+        guard let url = URL(string: urlStr) else {
+            throw MatrixBridgeError.notSupported("Invalid send URL")
+        }
+
+        var info: [String: Any] = ["mimetype": mimeType]
+        if let fileSize { info["size"] = fileSize }
+        if let duration { info["duration"] = duration }
+        if let width { info["w"] = width }
+        if let height { info["h"] = height }
+
+        let content: [String: Any] = [
+            "msgtype": msgtype,
+            "body": body,
+            "url": mxcUrl,
+            "info": info,
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: content)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard statusCode >= 200 && statusCode < 300 else {
+            let errBody = String(data: data, encoding: .utf8) ?? ""
+            throw MatrixBridgeError.notSupported("sendMediaEvent failed with status \(statusCode): \(errBody)")
+        }
+
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let eventId = json["event_id"] as? String {
+            return eventId
+        }
         return ""
     }
 
@@ -1332,7 +1422,17 @@ class MatrixSDKBridge {
 
         // Read file data from URI
         let fileData: Data
-        if fileUri.hasPrefix("file://"), let fileUrl = URL(string: fileUri) {
+        if fileUri.hasPrefix("data:") {
+            // data:[<mediatype>][;base64],<data>
+            guard let commaIdx = fileUri.firstIndex(of: ",") else {
+                throw MatrixBridgeError.notSupported("Invalid data URI")
+            }
+            let base64Str = String(fileUri[fileUri.index(after: commaIdx)...])
+            guard let decoded = Data(base64Encoded: base64Str) else {
+                throw MatrixBridgeError.notSupported("Failed to decode base64 data URI")
+            }
+            fileData = decoded
+        } else if fileUri.hasPrefix("file://"), let fileUrl = URL(string: fileUri) {
             fileData = try Data(contentsOf: fileUrl)
         } else {
             let fileUrl = URL(fileURLWithPath: fileUri)

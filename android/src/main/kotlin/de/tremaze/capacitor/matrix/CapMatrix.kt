@@ -1003,12 +1003,69 @@ class CapMatrix(private val context: Context) {
 
     // ── Messaging ────────────────────────────────────────────────────────
 
-    suspend fun sendMessage(roomId: String, body: String, msgtype: String): String {
+    suspend fun sendMessage(
+        roomId: String, body: String, msgtype: String,
+        fileUri: String? = null, fileName: String? = null, mimeType: String? = null,
+        fileSize: Int? = null, duration: Int? = null, width: Int? = null, height: Int? = null
+    ): String {
+        val mediaTypes = listOf("m.image", "m.audio", "m.video", "m.file")
+        if (msgtype in mediaTypes && fileUri != null && fileName != null && mimeType != null) {
+            // Media message: upload file, then send event via CS API
+            val mxcUrl = uploadContent(fileUri, fileName, mimeType)
+            return sendMediaEvent(roomId, body, msgtype, mxcUrl, mimeType, fileSize, duration, width, height)
+        }
+        // Text message
         val room = requireRoom(roomId)
         val timeline = getOrCreateTimeline(room)
         val content = messageEventContentFromMarkdown(body)
         timeline.send(content)
         return ""
+    }
+
+    private suspend fun sendMediaEvent(
+        roomId: String, body: String, msgtype: String, mxcUrl: String,
+        mimeType: String, fileSize: Int?, duration: Int?, width: Int?, height: Int?
+    ): String {
+        val session = sessionStore.load() ?: throw MatrixBridgeError.NotLoggedIn()
+        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val txnId = "m${System.currentTimeMillis()}${(0..99999).random()}"
+        val encodedRoomId = URLEncoder.encode(roomId, "UTF-8")
+        val urlString = "$baseUrl/_matrix/client/v3/rooms/$encodedRoomId/send/m.room.message/$txnId"
+
+        val info = JSONObject().apply {
+            put("mimetype", mimeType)
+            if (fileSize != null) put("size", fileSize)
+            if (duration != null) put("duration", duration)
+            if (width != null) put("w", width)
+            if (height != null) put("h", height)
+        }
+
+        val content = JSONObject().apply {
+            put("msgtype", msgtype)
+            put("body", body)
+            put("url", mxcUrl)
+            put("info", info)
+        }
+
+        val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
+            requestMethod = "PUT"
+            setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+            setRequestProperty("Content-Type", "application/json")
+            doOutput = true
+        }
+        try {
+            conn.outputStream.use { it.write(content.toString().toByteArray()) }
+            val statusCode = conn.responseCode
+            if (statusCode !in 200..299) {
+                val errBody = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+                throw MatrixBridgeError.Custom("sendMediaEvent failed with status $statusCode: ${errBody?.take(300)}")
+            }
+            val respBody = conn.inputStream.bufferedReader().readText()
+            val json = JSONObject(respBody)
+            return json.optString("event_id", "")
+        } finally {
+            conn.disconnect()
+        }
     }
 
     suspend fun editMessage(roomId: String, eventId: String, newBody: String): String {
@@ -1329,7 +1386,12 @@ class CapMatrix(private val context: Context) {
         val urlString = "$baseUrl/_matrix/media/v3/upload?filename=$encodedFileName"
 
         // Read file data from URI
-        val fileData: ByteArray = if (fileUri.startsWith("content://")) {
+        val fileData: ByteArray = if (fileUri.startsWith("data:")) {
+            // data:[<mediatype>][;base64],<data>
+            val commaIdx = fileUri.indexOf(',')
+            if (commaIdx < 0) throw MatrixBridgeError.Custom("Invalid data URI")
+            android.util.Base64.decode(fileUri.substring(commaIdx + 1), android.util.Base64.DEFAULT)
+        } else if (fileUri.startsWith("content://")) {
             val uri = Uri.parse(fileUri)
             context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: throw MatrixBridgeError.Custom("Cannot read content URI: $fileUri")

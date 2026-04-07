@@ -289,14 +289,21 @@ class CapMatrixPlugin : Plugin() {
         val body = call.getString("body")
             ?: return call.reject("Missing body")
         val msgtype = call.getString("msgtype") ?: "m.text"
-        // Media info fields — consumed by the bridge when media sending is fully implemented
-        @Suppress("UNUSED_VARIABLE") val duration = call.getInt("duration")
-        @Suppress("UNUSED_VARIABLE") val width = call.getInt("width")
-        @Suppress("UNUSED_VARIABLE") val height = call.getInt("height")
+        val fileUri = call.getString("fileUri")
+        val fileName = call.getString("fileName")
+        val mimeType = call.getString("mimeType")
+        val fileSize = call.getInt("fileSize")
+        val duration = call.getInt("duration")
+        val width = call.getInt("width")
+        val height = call.getInt("height")
 
         scope.launch {
             try {
-                val eventId = matrixBridge.sendMessage(roomId, body, msgtype)
+                val eventId = matrixBridge.sendMessage(
+                    roomId, body, msgtype,
+                    fileUri = fileUri, fileName = fileName, mimeType = mimeType,
+                    fileSize = fileSize, duration = duration, width = width, height = height
+                )
                 call.resolve(JSObject().put("eventId", eventId))
             } catch (e: Exception) {
                 call.reject(e.message ?: "sendMessage failed", e)

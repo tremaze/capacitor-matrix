@@ -165,6 +165,11 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
                         DispatchQueue.main.async {
                             self?.notifyListeners("receiptReceived", data: ["roomId": roomId, "eventId": eventId, "userId": userId])
                         }
+                    },
+                    onTyping: { [weak self] roomId, userIds in
+                        DispatchQueue.main.async {
+                            self?.notifyListeners("typingChanged", data: ["roomId": roomId, "userIds": userIds])
+                        }
                     }
                 )
                 call.resolve()
@@ -252,14 +257,21 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters")
         }
         let msgtype = call.getString("msgtype") ?? "m.text"
-        // Media info fields — consumed by the bridge when media sending is fully implemented
-        _ = call.getInt("duration")
-        _ = call.getInt("width")
-        _ = call.getInt("height")
+        let fileUri = call.getString("fileUri")
+        let fileName = call.getString("fileName")
+        let mimeType = call.getString("mimeType")
+        let fileSize = call.getInt("fileSize")
+        let duration = call.getInt("duration")
+        let width = call.getInt("width")
+        let height = call.getInt("height")
 
         Task {
             do {
-                let eventId = try await matrixBridge.sendMessage(roomId: roomId, body: body, msgtype: msgtype)
+                let eventId = try await matrixBridge.sendMessage(
+                    roomId: roomId, body: body, msgtype: msgtype,
+                    fileUri: fileUri, fileName: fileName, mimeType: mimeType,
+                    fileSize: fileSize, duration: duration, width: width, height: height
+                )
                 call.resolve(["eventId": eventId])
             } catch {
                 call.reject(error.localizedDescription)
