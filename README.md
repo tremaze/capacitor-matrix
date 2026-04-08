@@ -1268,52 +1268,64 @@ removeAllListeners() => Promise<void>
 
 #### SendMessageOptions
 
-| Prop           | Type                                                                                                | Description                                                               |
-| -------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| **`roomId`**   | <code>string</code>                                                                                 |                                                                           |
-| **`body`**     | <code>string</code>                                                                                 |                                                                           |
-| **`msgtype`**  | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |                                                                           |
-| **`fileUri`**  | <code>string</code>                                                                                 |                                                                           |
-| **`fileName`** | <code>string</code>                                                                                 |                                                                           |
-| **`mimeType`** | <code>string</code>                                                                                 |                                                                           |
-| **`fileSize`** | <code>number</code>                                                                                 |                                                                           |
-| **`duration`** | <code>number</code>                                                                                 | Audio/video duration in milliseconds (sets info.duration per Matrix spec) |
-| **`width`**    | <code>number</code>                                                                                 | Image/video width in pixels (sets info.w per Matrix spec)                 |
-| **`height`**   | <code>number</code>                                                                                 | Image/video height in pixels (sets info.h per Matrix spec)                |
+| Prop                    | Type                                                                                                | Description                                                               |
+| ----------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **`roomId`**            | <code>string</code>                                                                                 |                                                                           |
+| **`body`**              | <code>string</code>                                                                                 |                                                                           |
+| **`msgtype`**           | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |                                                                           |
+| **`fileUri`**           | <code>string</code>                                                                                 |                                                                           |
+| **`fileName`**          | <code>string</code>                                                                                 |                                                                           |
+| **`mimeType`**          | <code>string</code>                                                                                 |                                                                           |
+| **`fileSize`**          | <code>number</code>                                                                                 |                                                                           |
+| **`duration`**          | <code>number</code>                                                                                 | Audio/video duration in milliseconds (sets info.duration per Matrix spec) |
+| **`width`**             | <code>number</code>                                                                                 | Image/video width in pixels (sets info.w per Matrix spec)                 |
+| **`height`**            | <code>number</code>                                                                                 | Image/video height in pixels (sets info.h per Matrix spec)                |
+| **`thumbnailUri`**      | <code>string</code>                                                                                 | Base64 data URI of a thumbnail image (e.g. 'data:image/jpeg;base64,...')  |
+| **`thumbnailMimeType`** | <code>string</code>                                                                                 | MIME type of the thumbnail (e.g. 'image/jpeg')                            |
+| **`thumbnailWidth`**    | <code>number</code>                                                                                 | Thumbnail width in pixels                                                 |
+| **`thumbnailHeight`**   | <code>number</code>                                                                                 | Thumbnail height in pixels                                                |
 
 
 #### EditMessageOptions
 
-| Prop           | Type                                                                                                | Description                                                             |
-| -------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| **`roomId`**   | <code>string</code>                                                                                 |                                                                         |
-| **`eventId`**  | <code>string</code>                                                                                 |                                                                         |
-| **`newBody`**  | <code>string</code>                                                                                 |                                                                         |
-| **`msgtype`**  | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> | Required when editing a media message; must match the original msgtype  |
-| **`fileUri`**  | <code>string</code>                                                                                 | New file to replace the media content (optional for caption-only edits) |
-| **`fileName`** | <code>string</code>                                                                                 |                                                                         |
-| **`mimeType`** | <code>string</code>                                                                                 |                                                                         |
-| **`fileSize`** | <code>number</code>                                                                                 |                                                                         |
-| **`duration`** | <code>number</code>                                                                                 | Audio/video duration in milliseconds                                    |
-| **`width`**    | <code>number</code>                                                                                 | Image/video width in pixels                                             |
-| **`height`**   | <code>number</code>                                                                                 | Image/video height in pixels                                            |
+| Prop                    | Type                                                                                                | Description                                                              |
+| ----------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| **`roomId`**            | <code>string</code>                                                                                 |                                                                          |
+| **`eventId`**           | <code>string</code>                                                                                 |                                                                          |
+| **`newBody`**           | <code>string</code>                                                                                 |                                                                          |
+| **`msgtype`**           | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> | Required when editing a media message; must match the original msgtype   |
+| **`fileUri`**           | <code>string</code>                                                                                 | New file to replace the media content (optional for caption-only edits)  |
+| **`fileName`**          | <code>string</code>                                                                                 |                                                                          |
+| **`mimeType`**          | <code>string</code>                                                                                 |                                                                          |
+| **`fileSize`**          | <code>number</code>                                                                                 |                                                                          |
+| **`duration`**          | <code>number</code>                                                                                 | Audio/video duration in milliseconds                                     |
+| **`width`**             | <code>number</code>                                                                                 | Image/video width in pixels                                              |
+| **`height`**            | <code>number</code>                                                                                 | Image/video height in pixels                                             |
+| **`thumbnailUri`**      | <code>string</code>                                                                                 | Base64 data URI of a thumbnail image (e.g. 'data:image/jpeg;base64,...') |
+| **`thumbnailMimeType`** | <code>string</code>                                                                                 | MIME type of the thumbnail (e.g. 'image/jpeg')                           |
+| **`thumbnailWidth`**    | <code>number</code>                                                                                 | Thumbnail width in pixels                                                |
+| **`thumbnailHeight`**   | <code>number</code>                                                                                 | Thumbnail height in pixels                                               |
 
 
 #### SendReplyOptions
 
-| Prop                 | Type                                                                                                | Description                                                               |
-| -------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| **`roomId`**         | <code>string</code>                                                                                 |                                                                           |
-| **`body`**           | <code>string</code>                                                                                 |                                                                           |
-| **`replyToEventId`** | <code>string</code>                                                                                 |                                                                           |
-| **`msgtype`**        | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |                                                                           |
-| **`fileUri`**        | <code>string</code>                                                                                 |                                                                           |
-| **`fileName`**       | <code>string</code>                                                                                 |                                                                           |
-| **`mimeType`**       | <code>string</code>                                                                                 |                                                                           |
-| **`fileSize`**       | <code>number</code>                                                                                 |                                                                           |
-| **`duration`**       | <code>number</code>                                                                                 | Audio/video duration in milliseconds (sets info.duration per Matrix spec) |
-| **`width`**          | <code>number</code>                                                                                 | Image/video width in pixels (sets info.w per Matrix spec)                 |
-| **`height`**         | <code>number</code>                                                                                 | Image/video height in pixels (sets info.h per Matrix spec)                |
+| Prop                    | Type                                                                                                | Description                                                               |
+| ----------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **`roomId`**            | <code>string</code>                                                                                 |                                                                           |
+| **`body`**              | <code>string</code>                                                                                 |                                                                           |
+| **`replyToEventId`**    | <code>string</code>                                                                                 |                                                                           |
+| **`msgtype`**           | <code>'m.text' \| 'm.notice' \| 'm.emote' \| 'm.image' \| 'm.audio' \| 'm.video' \| 'm.file'</code> |                                                                           |
+| **`fileUri`**           | <code>string</code>                                                                                 |                                                                           |
+| **`fileName`**          | <code>string</code>                                                                                 |                                                                           |
+| **`mimeType`**          | <code>string</code>                                                                                 |                                                                           |
+| **`fileSize`**          | <code>number</code>                                                                                 |                                                                           |
+| **`duration`**          | <code>number</code>                                                                                 | Audio/video duration in milliseconds (sets info.duration per Matrix spec) |
+| **`width`**             | <code>number</code>                                                                                 | Image/video width in pixels (sets info.w per Matrix spec)                 |
+| **`height`**            | <code>number</code>                                                                                 | Image/video height in pixels (sets info.h per Matrix spec)                |
+| **`thumbnailUri`**      | <code>string</code>                                                                                 | Base64 data URI of a thumbnail image (e.g. 'data:image/jpeg;base64,...')  |
+| **`thumbnailMimeType`** | <code>string</code>                                                                                 | MIME type of the thumbnail (e.g. 'image/jpeg')                            |
+| **`thumbnailWidth`**    | <code>number</code>                                                                                 | Thumbnail width in pixels                                                 |
+| **`thumbnailHeight`**   | <code>number</code>                                                                                 | Thumbnail height in pixels                                                |
 
 
 #### MatrixEvent
