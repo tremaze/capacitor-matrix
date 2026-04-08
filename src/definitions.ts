@@ -36,6 +36,14 @@ export interface SendMessageOptions {
   width?: number;
   /** Image/video height in pixels (sets info.h per Matrix spec) */
   height?: number;
+  /** Base64 data URI of a thumbnail image (e.g. 'data:image/jpeg;base64,...') */
+  thumbnailUri?: string;
+  /** MIME type of the thumbnail (e.g. 'image/jpeg') */
+  thumbnailMimeType?: string;
+  /** Thumbnail width in pixels */
+  thumbnailWidth?: number;
+  /** Thumbnail height in pixels */
+  thumbnailHeight?: number;
 }
 
 // Presence
@@ -85,6 +93,14 @@ export interface EditMessageOptions {
   width?: number;
   /** Image/video height in pixels */
   height?: number;
+  /** Base64 data URI of a thumbnail image (e.g. 'data:image/jpeg;base64,...') */
+  thumbnailUri?: string;
+  /** MIME type of the thumbnail (e.g. 'image/jpeg') */
+  thumbnailMimeType?: string;
+  /** Thumbnail width in pixels */
+  thumbnailWidth?: number;
+  /** Thumbnail height in pixels */
+  thumbnailHeight?: number;
 }
 
 export interface SendReplyOptions {
@@ -102,6 +118,14 @@ export interface SendReplyOptions {
   width?: number;
   /** Image/video height in pixels (sets info.h per Matrix spec) */
   height?: number;
+  /** Base64 data URI of a thumbnail image (e.g. 'data:image/jpeg;base64,...') */
+  thumbnailUri?: string;
+  /** MIME type of the thumbnail (e.g. 'image/jpeg') */
+  thumbnailMimeType?: string;
+  /** Thumbnail width in pixels */
+  thumbnailWidth?: number;
+  /** Thumbnail height in pixels */
+  thumbnailHeight?: number;
 }
 
 // Upload

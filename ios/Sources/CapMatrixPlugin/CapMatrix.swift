@@ -1015,16 +1015,21 @@ class MatrixSDKBridge {
     func sendMessage(
         roomId: String, body: String, msgtype: String,
         fileUri: String? = nil, fileName: String? = nil, mimeType: String? = nil,
-        fileSize: Int? = nil, duration: Int? = nil, width: Int? = nil, height: Int? = nil
+        fileSize: Int? = nil, duration: Int? = nil, width: Int? = nil, height: Int? = nil,
+        thumbnailUri: String? = nil, thumbnailMimeType: String? = nil,
+        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil
     ) async throws -> String {
         let mediaTypes = ["m.image", "m.audio", "m.video", "m.file"]
         if mediaTypes.contains(msgtype), let fileUri = fileUri, let fileName = fileName, let mimeType = mimeType {
-            // Media message: upload file, then send event via CS API
-            let mxcUrl = try await uploadContent(fileUri: fileUri, fileName: fileName, mimeType: mimeType)
-            return try await sendMediaEvent(
-                roomId: roomId, body: body, msgtype: msgtype, mxcUrl: mxcUrl,
-                mimeType: mimeType, fileSize: fileSize, duration: duration, width: width, height: height
+            try await sendMedia(
+                roomId: roomId, msgtype: msgtype,
+                fileUri: fileUri, fileName: fileName, mimeType: mimeType,
+                fileSize: fileSize, duration: duration, width: width, height: height,
+                caption: body, inReplyTo: nil,
+                thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
+                thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
             )
+            return ""
         }
         // Text message
         let room = try requireRoom(roomId: roomId)
@@ -1034,52 +1039,171 @@ class MatrixSDKBridge {
         return ""
     }
 
-    private func sendMediaEvent(
-        roomId: String, body: String, msgtype: String, mxcUrl: String,
-        mimeType: String, fileSize: Int?, duration: Int?, width: Int?, height: Int?
-    ) async throws -> String {
-        guard let session = sessionStore.load() else { throw MatrixBridgeError.notLoggedIn }
+    // MARK: - sendMedia (HTTP-based, bypasses Rust image decoder)
+
+    /// Upload the file bytes and send the Matrix event via the Client-Server HTTP API.
+    /// This avoids `timeline.sendImage/sendVideo/sendAudio/sendFile` which internally
+    /// invoke the Rust `image` crate to decode/validate the attachment — a step that
+    /// throws `InvalidAttachmentData` for image formats the crate does not support
+    /// (e.g. HEIC, some JPEG variants). The approach mirrors the Android implementation.
+    private func sendMedia(
+        roomId: String,
+        msgtype: String,
+        fileUri: String, fileName: String, mimeType: String,
+        fileSize: Int?, duration: Int?, width: Int?, height: Int?,
+        caption: String?, inReplyTo: String?,
+        thumbnailUri: String? = nil, thumbnailMimeType: String? = nil,
+        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil
+    ) async throws {
+        print("[CapMatrix] sendMedia: msgtype=\(msgtype) mimeType=\(mimeType) fileName=\(fileName) fileUri=\(String(fileUri.prefix(80)))")
+
+        // 1. Read file bytes from data URI, file:// URL, or plain path
+        let fileData: Data
+        if fileUri.hasPrefix("data:") {
+            guard let commaIdx = fileUri.firstIndex(of: ",") else {
+                throw MatrixBridgeError.notSupported("Invalid data URI")
+            }
+            let base64Str = String(fileUri[fileUri.index(after: commaIdx)...])
+            guard let decoded = Data(base64Encoded: base64Str) else {
+                throw MatrixBridgeError.notSupported("Failed to decode base64 data URI")
+            }
+            fileData = decoded
+        } else if fileUri.hasPrefix("file://"), let fileUrl = URL(string: fileUri) {
+            fileData = try Data(contentsOf: fileUrl)
+        } else {
+            fileData = try Data(contentsOf: URL(fileURLWithPath: fileUri))
+        }
+        print("[CapMatrix] sendMedia: read \(fileData.count) bytes")
+
+        guard let session = sessionStore.load() else {
+            throw MatrixBridgeError.notLoggedIn
+        }
         let baseUrl = session.homeserverUrl.hasSuffix("/")
             ? String(session.homeserverUrl.dropLast())
             : session.homeserverUrl
-        let txnId = "m\(UInt64(Date().timeIntervalSince1970 * 1000))\(Int.random(in: 0..<100000))"
+
+        // 2. Upload to media server
+        let encodedFileName = fileName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? fileName
+        guard let uploadUrl = URL(string: "\(baseUrl)/_matrix/media/v3/upload?filename=\(encodedFileName)") else {
+            throw MatrixBridgeError.notSupported("Invalid upload URL")
+        }
+        var uploadRequest = URLRequest(url: uploadUrl)
+        uploadRequest.httpMethod = "POST"
+        uploadRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        uploadRequest.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        uploadRequest.httpBody = fileData
+
+        let (uploadData, uploadResponse) = try await URLSession.shared.data(for: uploadRequest)
+        let uploadStatus = (uploadResponse as? HTTPURLResponse)?.statusCode ?? -1
+        guard uploadStatus >= 200 && uploadStatus < 300 else {
+            throw MatrixBridgeError.notSupported("Upload failed with status \(uploadStatus)")
+        }
+        guard let uploadJson = try JSONSerialization.jsonObject(with: uploadData) as? [String: Any],
+              let mxcUrl = uploadJson["content_uri"] as? String else {
+            throw MatrixBridgeError.notSupported("Invalid upload response")
+        }
+        print("[CapMatrix] sendMedia: uploaded, mxcUrl=\(mxcUrl)")
+
+        // 2b. Upload thumbnail if provided
+        var thumbnailMxcUrl: String? = nil
+        var thumbnailSize: Int? = nil
+        if let thumbnailUri = thumbnailUri, let thumbnailMimeType = thumbnailMimeType {
+            let thumbData: Data
+            if thumbnailUri.hasPrefix("data:") {
+                guard let commaIdx = thumbnailUri.firstIndex(of: ",") else {
+                    throw MatrixBridgeError.notSupported("Invalid thumbnail data URI")
+                }
+                let base64Str = String(thumbnailUri[thumbnailUri.index(after: commaIdx)...])
+                guard let decoded = Data(base64Encoded: base64Str) else {
+                    throw MatrixBridgeError.notSupported("Failed to decode thumbnail base64 data URI")
+                }
+                thumbData = decoded
+            } else if thumbnailUri.hasPrefix("file://"), let fileUrl = URL(string: thumbnailUri) {
+                thumbData = try Data(contentsOf: fileUrl)
+            } else {
+                thumbData = try Data(contentsOf: URL(fileURLWithPath: thumbnailUri))
+            }
+
+            guard let thumbUploadUrl = URL(string: "\(baseUrl)/_matrix/media/v3/upload") else {
+                throw MatrixBridgeError.notSupported("Invalid thumbnail upload URL")
+            }
+            var thumbRequest = URLRequest(url: thumbUploadUrl)
+            thumbRequest.httpMethod = "POST"
+            thumbRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+            thumbRequest.setValue(thumbnailMimeType, forHTTPHeaderField: "Content-Type")
+            thumbRequest.httpBody = thumbData
+
+            let (thumbUploadData, thumbUploadResponse) = try await URLSession.shared.data(for: thumbRequest)
+            let thumbStatus = (thumbUploadResponse as? HTTPURLResponse)?.statusCode ?? -1
+            guard thumbStatus >= 200 && thumbStatus < 300 else {
+                throw MatrixBridgeError.notSupported("Thumbnail upload failed with status \(thumbStatus)")
+            }
+            guard let thumbJson = try JSONSerialization.jsonObject(with: thumbUploadData) as? [String: Any],
+                  let thumbMxcUrl = thumbJson["content_uri"] as? String else {
+                throw MatrixBridgeError.notSupported("Invalid thumbnail upload response")
+            }
+            print("[CapMatrix] sendMedia: thumbnail uploaded, mxcUrl=\(thumbMxcUrl)")
+
+            // Store thumbnail info for inclusion in the event content below
+            thumbnailMxcUrl = thumbMxcUrl
+            thumbnailSize = thumbData.count
+        }
+
+        // 3. Build Matrix event content
+        var content: [String: Any] = [
+            "msgtype": msgtype,
+            "body": caption ?? fileName,
+            "url": mxcUrl,
+        ]
+        var info: [String: Any] = ["mimetype": mimeType]
+        if let size = fileSize { info["size"] = size }
+        switch msgtype {
+        case "m.image":
+            if let w = width  { info["w"] = w }
+            if let h = height { info["h"] = h }
+        case "m.video":
+            if let dur = duration { info["duration"] = dur }
+            if let w = width  { info["w"] = w }
+            if let h = height { info["h"] = h }
+        case "m.audio":
+            if let dur = duration { info["duration"] = dur }
+        default:
+            break
+        }
+        if let thumbUrl = thumbnailMxcUrl {
+            info["thumbnail_url"] = thumbUrl
+            var thumbInfo: [String: Any] = [:]
+            if let mt = thumbnailMimeType { thumbInfo["mimetype"] = mt }
+            if let s = thumbnailSize { thumbInfo["size"] = s }
+            if let w = thumbnailWidth { thumbInfo["w"] = w }
+            if let h = thumbnailHeight { thumbInfo["h"] = h }
+            info["thumbnail_info"] = thumbInfo
+        }
+        content["info"] = info
+
+        if let replyId = inReplyTo {
+            content["m.relates_to"] = ["m.in_reply_to": ["event_id": replyId]]
+        }
+
+        // 4. Send event via Matrix Client-Server API
+        let txnId = UUID().uuidString
         let encodedRoomId = roomId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? roomId
-        let urlStr = "\(baseUrl)/_matrix/client/v3/rooms/\(encodedRoomId)/send/m.room.message/\(txnId)"
-        guard let url = URL(string: urlStr) else {
+        guard let sendUrl = URL(string: "\(baseUrl)/_matrix/client/v3/rooms/\(encodedRoomId)/send/m.room.message/\(txnId)") else {
             throw MatrixBridgeError.notSupported("Invalid send URL")
         }
+        let eventData = try JSONSerialization.data(withJSONObject: content)
+        var sendRequest = URLRequest(url: sendUrl)
+        sendRequest.httpMethod = "PUT"
+        sendRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        sendRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        sendRequest.httpBody = eventData
 
-        var info: [String: Any] = ["mimetype": mimeType]
-        if let fileSize { info["size"] = fileSize }
-        if let duration { info["duration"] = duration }
-        if let width { info["w"] = width }
-        if let height { info["h"] = height }
-
-        let content: [String: Any] = [
-            "msgtype": msgtype,
-            "body": body,
-            "url": mxcUrl,
-            "info": info,
-        ]
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: content)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-        guard statusCode >= 200 && statusCode < 300 else {
-            let errBody = String(data: data, encoding: .utf8) ?? ""
-            throw MatrixBridgeError.notSupported("sendMediaEvent failed with status \(statusCode): \(errBody)")
+        let (_, sendResponse) = try await URLSession.shared.data(for: sendRequest)
+        let sendStatus = (sendResponse as? HTTPURLResponse)?.statusCode ?? -1
+        guard sendStatus >= 200 && sendStatus < 300 else {
+            throw MatrixBridgeError.notSupported("Send failed with status \(sendStatus)")
         }
-
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let eventId = json["event_id"] as? String {
-            return eventId
-        }
-        return ""
+        print("[CapMatrix] sendMedia: sent successfully")
     }
 
     func editMessage(roomId: String, eventId: String, newBody: String) async throws -> String {
@@ -1091,9 +1215,29 @@ class MatrixSDKBridge {
         return ""
     }
 
-    func sendReply(roomId: String, body: String, replyToEventId: String, msgtype: String) async throws -> String {
+    func sendReply(
+        roomId: String, body: String, replyToEventId: String, msgtype: String,
+        fileUri: String? = nil, fileName: String? = nil, mimeType: String? = nil,
+        fileSize: Int? = nil, duration: Int? = nil, width: Int? = nil, height: Int? = nil,
+        thumbnailUri: String? = nil, thumbnailMimeType: String? = nil,
+        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil
+    ) async throws -> String {
         let room = try requireRoom(roomId: roomId)
         let timeline = try await getOrCreateTimeline(room: room)
+
+        let mediaTypes = ["m.image", "m.audio", "m.video", "m.file"]
+        if mediaTypes.contains(msgtype), let fileUri = fileUri, let fileName = fileName, let mimeType = mimeType {
+            try await sendMedia(
+                roomId: roomId, msgtype: msgtype,
+                fileUri: fileUri, fileName: fileName, mimeType: mimeType,
+                fileSize: fileSize, duration: duration, width: width, height: height,
+                caption: body, inReplyTo: replyToEventId,
+                thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
+                thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
+            )
+            return ""
+        }
+        // Text reply
         let content = messageEventContentFromMarkdown(md: body)
         try await timeline.sendReply(msg: content, eventId: replyToEventId)
         return ""
@@ -2097,14 +2241,25 @@ private func serializeLatestEventValue(_ value: LatestEventValue, roomId: String
             switch messageContent.msgType {
             case .text:
                 contentDict["msgtype"] = "m.text"
-            case .image:
+            case .image(let imgContent):
                 contentDict["msgtype"] = "m.image"
-            case .file:
+                extractMediaUrl(source: imgContent.source, into: &contentDict)
+                extractImageInfo(imgContent, into: &contentDict)
+            case .file(let fileContent):
                 contentDict["msgtype"] = "m.file"
-            case .audio:
+                contentDict["filename"] = fileContent.filename
+                extractMediaUrl(source: fileContent.source, into: &contentDict)
+                extractFileInfo(fileContent, into: &contentDict)
+            case .audio(let audioContent):
                 contentDict["msgtype"] = "m.audio"
-            case .video:
+                contentDict["filename"] = audioContent.filename
+                extractMediaUrl(source: audioContent.source, into: &contentDict)
+                extractAudioInfo(audioContent, into: &contentDict)
+            case .video(let videoContent):
                 contentDict["msgtype"] = "m.video"
+                contentDict["filename"] = videoContent.filename
+                extractMediaUrl(source: videoContent.source, into: &contentDict)
+                extractVideoInfo(videoContent, into: &contentDict)
             case .emote:
                 contentDict["msgtype"] = "m.emote"
             case .notice:
@@ -2172,6 +2327,71 @@ private func extractMediaUrl(source: MediaSource, into contentDict: inout [Strin
     }
 }
 
+private func extractThumbnailFields(source: MediaSource?, info: ThumbnailInfo?) -> [String: Any]? {
+    guard let source = source else { return nil }
+    let thumbUrl = source.url()
+    guard !thumbUrl.isEmpty else { return nil }
+    var result: [String: Any] = ["thumbnail_url": thumbUrl]
+    var thumbInfo: [String: Any] = [:]
+    if let ti = info {
+        if let mt = ti.mimetype { thumbInfo["mimetype"] = mt }
+        if let sz = ti.size     { thumbInfo["size"] = Int(sz) }
+        if let w  = ti.width    { thumbInfo["w"] = Int(w) }
+        if let h  = ti.height   { thumbInfo["h"] = Int(h) }
+    }
+    if !thumbInfo.isEmpty {
+        result["thumbnail_info"] = thumbInfo
+    }
+    return result
+}
+
+private func extractImageInfo(_ imgContent: ImageMessageContent, into contentDict: inout [String: Any]) {
+    guard let info = imgContent.info else { return }
+    var infoDict: [String: Any] = [:]
+    if let mt = info.mimetype { infoDict["mimetype"] = mt }
+    if let sz = info.size     { infoDict["size"] = Int(sz) }
+    if let w  = info.width    { infoDict["w"] = Int(w) }
+    if let h  = info.height   { infoDict["h"] = Int(h) }
+    if let thumb = extractThumbnailFields(source: info.thumbnailSource, info: info.thumbnailInfo) {
+        for (k, v) in thumb { infoDict[k] = v }
+    }
+    contentDict["info"] = infoDict
+}
+
+private func extractVideoInfo(_ videoContent: VideoMessageContent, into contentDict: inout [String: Any]) {
+    guard let info = videoContent.info else { return }
+    var infoDict: [String: Any] = [:]
+    if let mt  = info.mimetype { infoDict["mimetype"] = mt }
+    if let sz  = info.size     { infoDict["size"] = Int(sz) }
+    if let w   = info.width    { infoDict["w"] = Int(w) }
+    if let h   = info.height   { infoDict["h"] = Int(h) }
+    if let dur = info.duration { infoDict["duration"] = Int(dur * 1000) }
+    if let thumb = extractThumbnailFields(source: info.thumbnailSource, info: info.thumbnailInfo) {
+        for (k, v) in thumb { infoDict[k] = v }
+    }
+    contentDict["info"] = infoDict
+}
+
+private func extractAudioInfo(_ audioContent: AudioMessageContent, into contentDict: inout [String: Any]) {
+    guard let info = audioContent.info else { return }
+    var infoDict: [String: Any] = [:]
+    if let mt  = info.mimetype { infoDict["mimetype"] = mt }
+    if let sz  = info.size     { infoDict["size"] = Int(sz) }
+    if let dur = info.duration { infoDict["duration"] = Int(dur * 1000) }
+    contentDict["info"] = infoDict
+}
+
+private func extractFileInfo(_ fileContent: FileMessageContent, into contentDict: inout [String: Any]) {
+    guard let info = fileContent.info else { return }
+    var infoDict: [String: Any] = [:]
+    if let mt = info.mimetype { infoDict["mimetype"] = mt }
+    if let sz = info.size     { infoDict["size"] = Int(sz) }
+    if let thumb = extractThumbnailFields(source: info.thumbnailSource, info: info.thumbnailInfo) {
+        for (k, v) in thumb { infoDict[k] = v }
+    }
+    contentDict["info"] = infoDict
+}
+
 private func serializeTimelineItem(_ item: TimelineItem, roomId: String) -> [String: Any]? {
     guard let eventItem = item.asEvent() else { return nil }
     return serializeEventTimelineItem(eventItem, roomId: roomId)
@@ -2198,18 +2418,22 @@ private func serializeEventTimelineItem(_ eventItem: EventTimelineItem, roomId: 
             case .image(let imgContent):
                 contentDict["msgtype"] = "m.image"
                 extractMediaUrl(source: imgContent.source, into: &contentDict)
+                extractImageInfo(imgContent, into: &contentDict)
             case .file(let fileContent):
                 contentDict["msgtype"] = "m.file"
                 contentDict["filename"] = fileContent.filename
                 extractMediaUrl(source: fileContent.source, into: &contentDict)
+                extractFileInfo(fileContent, into: &contentDict)
             case .audio(let audioContent):
                 contentDict["msgtype"] = "m.audio"
                 contentDict["filename"] = audioContent.filename
                 extractMediaUrl(source: audioContent.source, into: &contentDict)
+                extractAudioInfo(audioContent, into: &contentDict)
             case .video(let videoContent):
                 contentDict["msgtype"] = "m.video"
                 contentDict["filename"] = videoContent.filename
                 extractMediaUrl(source: videoContent.source, into: &contentDict)
+                extractVideoInfo(videoContent, into: &contentDict)
             case .emote:
                 contentDict["msgtype"] = "m.emote"
             case .notice:

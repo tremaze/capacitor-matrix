@@ -524,6 +524,28 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     await this.client!.forget(options.roomId);
   }
 
+  // ── Thumbnail helper ────────────────────────────────────
+
+  private async uploadThumbnail(
+    options: { thumbnailUri?: string; thumbnailMimeType?: string; thumbnailWidth?: number; thumbnailHeight?: number },
+  ): Promise<{ thumbnail_url: string; thumbnail_info: Record<string, unknown> } | null> {
+    if (!options.thumbnailUri) return null;
+    const response = await fetch(options.thumbnailUri);
+    const blob = await response.blob();
+    const uploadRes = await this.client!.uploadContent(blob, {
+      type: options.thumbnailMimeType,
+    });
+    return {
+      thumbnail_url: uploadRes.content_uri,
+      thumbnail_info: {
+        mimetype: options.thumbnailMimeType,
+        size: blob.size,
+        w: options.thumbnailWidth,
+        h: options.thumbnailHeight,
+      },
+    };
+  }
+
   // ── Messaging ─────────────────────────────────────────
 
   async sendMessage(options: SendMessageOptions): Promise<{ eventId: string }> {
@@ -541,6 +563,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         type: options.mimeType,
       });
       const mxcUrl = uploadRes.content_uri;
+      const thumb = await this.uploadThumbnail(options);
       const content: Record<string, unknown> = {
         msgtype,
         body: options.body || options.fileName || 'file',
@@ -551,6 +574,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
           ...(options.duration !== undefined && { duration: options.duration }),
           ...(options.width !== undefined && { w: options.width }),
           ...(options.height !== undefined && { h: options.height }),
+          ...thumb,
         },
       };
       const res = await this.client!.sendMessage(options.roomId, content as any);
@@ -586,6 +610,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         name: options.fileName,
         type: options.mimeType,
       });
+      const thumb = await this.uploadThumbnail(options);
       newContent = {
         msgtype,
         body: options.newBody || options.fileName || 'file',
@@ -596,6 +621,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
           ...(options.duration !== undefined && { duration: options.duration }),
           ...(options.width !== undefined && { w: options.width }),
           ...(options.height !== undefined && { h: options.height }),
+          ...thumb,
         },
       };
     } else {
@@ -634,6 +660,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
         name: options.fileName,
         type: options.mimeType,
       });
+      const thumb = await this.uploadThumbnail(options);
       content = {
         msgtype,
         body: options.body || options.fileName || 'file',
@@ -644,6 +671,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
           ...(options.duration !== undefined && { duration: options.duration }),
           ...(options.width !== undefined && { w: options.width }),
           ...(options.height !== undefined && { h: options.height }),
+          ...thumb,
         },
         'm.relates_to': {
           'm.in_reply_to': {

@@ -53,7 +53,17 @@ import org.matrix.rustcomponents.sdk.TimelineDiff
 import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
+import org.matrix.rustcomponents.sdk.ThumbnailInfo
+import org.matrix.rustcomponents.sdk.ImageInfo
+import org.matrix.rustcomponents.sdk.VideoInfo
+import org.matrix.rustcomponents.sdk.AudioInfo
+import org.matrix.rustcomponents.sdk.FileInfo
+import org.matrix.rustcomponents.sdk.ImageMessageContent
+import org.matrix.rustcomponents.sdk.VideoMessageContent
+import org.matrix.rustcomponents.sdk.AudioMessageContent
+import org.matrix.rustcomponents.sdk.FileMessageContent
 import org.matrix.rustcomponents.sdk.messageEventContentFromMarkdown
+import java.time.Duration
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -1006,13 +1016,20 @@ class CapMatrix(private val context: Context) {
     suspend fun sendMessage(
         roomId: String, body: String, msgtype: String,
         fileUri: String? = null, fileName: String? = null, mimeType: String? = null,
-        fileSize: Int? = null, duration: Int? = null, width: Int? = null, height: Int? = null
+        fileSize: Int? = null, duration: Int? = null, width: Int? = null, height: Int? = null,
+        thumbnailUri: String? = null, thumbnailMimeType: String? = null,
+        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null
     ): String {
         val mediaTypes = listOf("m.image", "m.audio", "m.video", "m.file")
         if (msgtype in mediaTypes && fileUri != null && fileName != null && mimeType != null) {
-            // Media message: upload file, then send event via CS API
-            val mxcUrl = uploadContent(fileUri, fileName, mimeType)
-            return sendMediaEvent(roomId, body, msgtype, mxcUrl, mimeType, fileSize, duration, width, height)
+            sendMedia(
+                roomId, msgtype, fileUri, fileName, mimeType,
+                fileSize, duration, width, height,
+                caption = body, inReplyTo = null,
+                thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
+                thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
+            )
+            return ""
         }
         // Text message
         val room = requireRoom(roomId)
@@ -1022,50 +1039,128 @@ class CapMatrix(private val context: Context) {
         return ""
     }
 
-    private suspend fun sendMediaEvent(
-        roomId: String, body: String, msgtype: String, mxcUrl: String,
-        mimeType: String, fileSize: Int?, duration: Int?, width: Int?, height: Int?
-    ): String {
+    private suspend fun sendMedia(
+        roomId: String, msgtype: String,
+        fileUri: String, fileName: String, mimeType: String,
+        fileSize: Int?, duration: Int?, width: Int?, height: Int?,
+        caption: String?, inReplyTo: String?,
+        thumbnailUri: String? = null, thumbnailMimeType: String? = null,
+        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null
+    ) {
+        Log.d(TAG, "sendMedia: msgtype=$msgtype mimeType=$mimeType fileName=$fileName fileUri=${fileUri.take(80)}")
+
+        // Read the file bytes from whatever source was provided
+        val fileBytes: ByteArray = when {
+            fileUri.startsWith("data:") -> {
+                val commaIdx = fileUri.indexOf(',')
+                if (commaIdx < 0) throw MatrixBridgeError.Custom("Invalid data URI")
+                android.util.Base64.decode(fileUri.substring(commaIdx + 1), android.util.Base64.DEFAULT)
+            }
+            fileUri.startsWith("content://") -> {
+                val uri = Uri.parse(fileUri)
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw MatrixBridgeError.Custom("Cannot read content URI: $fileUri")
+            }
+            else -> {
+                val path = if (fileUri.startsWith("file://")) fileUri.removePrefix("file://") else fileUri
+                java.io.File(path).readBytes()
+            }
+        }
+        Log.d(TAG, "sendMedia: read ${fileBytes.size} bytes")
+
+        // Upload raw bytes to the media server — bypasses the Rust SDK's image-decoding
+        // validation in sendImage/sendVideo/sendAudio which throws InvalidAttachmentData
+        // for image formats the Rust `image` crate cannot decode (e.g. HEIC, some JPEGs).
+        val c = client ?: throw MatrixBridgeError.NotLoggedIn()
+        val mxcUrl = c.uploadMedia(mimeType, fileBytes, null)
+        Log.d(TAG, "sendMedia: uploaded, mxcUrl=$mxcUrl")
+
+        // Upload thumbnail if provided
+        var thumbnailMxcUrl: String? = null
+        var thumbnailSizeBytes: Int? = null
+        if (thumbnailUri != null && thumbnailMimeType != null) {
+            val thumbBytes: ByteArray = when {
+                thumbnailUri.startsWith("data:") -> {
+                    val commaIdx = thumbnailUri.indexOf(',')
+                    if (commaIdx < 0) throw MatrixBridgeError.Custom("Invalid thumbnail data URI")
+                    android.util.Base64.decode(thumbnailUri.substring(commaIdx + 1), android.util.Base64.DEFAULT)
+                }
+                thumbnailUri.startsWith("content://") -> {
+                    val uri = Uri.parse(thumbnailUri)
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw MatrixBridgeError.Custom("Cannot read thumbnail content URI: $thumbnailUri")
+                }
+                else -> {
+                    val path = if (thumbnailUri.startsWith("file://")) thumbnailUri.removePrefix("file://") else thumbnailUri
+                    java.io.File(path).readBytes()
+                }
+            }
+            val thumbMxcUrl = c.uploadMedia(thumbnailMimeType, thumbBytes, null)
+            Log.d(TAG, "sendMedia: thumbnail uploaded, mxcUrl=$thumbMxcUrl")
+            thumbnailMxcUrl = thumbMxcUrl
+            thumbnailSizeBytes = thumbBytes.size
+        }
+
+        // Build Matrix event content as JSON (bypasses Rust SDK serialization
+        // which may not include thumbnail fields in the final event)
         val session = sessionStore.load() ?: throw MatrixBridgeError.NotLoggedIn()
         val baseUrl = session.homeserverUrl.trimEnd('/')
-        val txnId = "m${System.currentTimeMillis()}${(0..99999).random()}"
-        val encodedRoomId = URLEncoder.encode(roomId, "UTF-8")
-        val urlString = "$baseUrl/_matrix/client/v3/rooms/$encodedRoomId/send/m.room.message/$txnId"
 
-        val info = JSONObject().apply {
-            put("mimetype", mimeType)
-            if (fileSize != null) put("size", fileSize)
-            if (duration != null) put("duration", duration)
-            if (width != null) put("w", width)
-            if (height != null) put("h", height)
-        }
-
-        val content = JSONObject().apply {
-            put("msgtype", msgtype)
-            put("body", body)
-            put("url", mxcUrl)
-            put("info", info)
-        }
-
-        val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
-            requestMethod = "PUT"
-            setRequestProperty("Authorization", "Bearer ${session.accessToken}")
-            setRequestProperty("Content-Type", "application/json")
-            doOutput = true
-        }
-        try {
-            conn.outputStream.use { it.write(content.toString().toByteArray()) }
-            val statusCode = conn.responseCode
-            if (statusCode !in 200..299) {
-                val errBody = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
-                throw MatrixBridgeError.Custom("sendMediaEvent failed with status $statusCode: ${errBody?.take(300)}")
+        val info = JSONObject()
+        info.put("mimetype", mimeType)
+        info.put("size", fileSize ?: fileBytes.size)
+        when (msgtype) {
+            "m.image" -> {
+                if (width != null) info.put("w", width)
+                if (height != null) info.put("h", height)
             }
-            val respBody = conn.inputStream.bufferedReader().readText()
-            val json = JSONObject(respBody)
-            return json.optString("event_id", "")
-        } finally {
-            conn.disconnect()
+            "m.video" -> {
+                if (duration != null) info.put("duration", duration)
+                if (width != null) info.put("w", width)
+                if (height != null) info.put("h", height)
+            }
+            "m.audio" -> {
+                if (duration != null) info.put("duration", duration)
+            }
         }
+        if (thumbnailMxcUrl != null) {
+            info.put("thumbnail_url", thumbnailMxcUrl)
+            val thumbInfo = JSONObject()
+            if (thumbnailMimeType != null) thumbInfo.put("mimetype", thumbnailMimeType)
+            if (thumbnailSizeBytes != null) thumbInfo.put("size", thumbnailSizeBytes)
+            if (thumbnailWidth != null) thumbInfo.put("w", thumbnailWidth)
+            if (thumbnailHeight != null) thumbInfo.put("h", thumbnailHeight)
+            info.put("thumbnail_info", thumbInfo)
+        }
+
+        val content = JSONObject()
+        content.put("msgtype", msgtype)
+        content.put("body", caption ?: fileName)
+        content.put("url", mxcUrl)
+        content.put("info", info)
+
+        if (inReplyTo != null) {
+            content.put("m.relates_to", JSONObject().put("m.in_reply_to", JSONObject().put("event_id", inReplyTo)))
+        }
+
+        // Send event via Matrix Client-Server API
+        val txnId = java.util.UUID.randomUUID().toString()
+        val encodedRoomId = URLEncoder.encode(roomId, "UTF-8")
+        val url = URL("$baseUrl/_matrix/client/v3/rooms/$encodedRoomId/send/m.room.message/$txnId")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "PUT"
+        conn.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.doOutput = true
+        conn.outputStream.use { os ->
+            os.write(content.toString().toByteArray(Charsets.UTF_8))
+        }
+        val responseCode = conn.responseCode
+        if (responseCode < 200 || responseCode >= 300) {
+            val errorBody = conn.errorStream?.bufferedReader()?.readText() ?: ""
+            throw MatrixBridgeError.Custom("Send failed with status $responseCode: $errorBody")
+        }
+        Log.d(TAG, "sendMedia: sent successfully")
     }
 
     suspend fun editMessage(roomId: String, eventId: String, newBody: String): String {
@@ -1077,7 +1172,25 @@ class CapMatrix(private val context: Context) {
         return ""
     }
 
-    suspend fun sendReply(roomId: String, body: String, replyToEventId: String, msgtype: String): String {
+    suspend fun sendReply(
+        roomId: String, body: String, replyToEventId: String, msgtype: String,
+        fileUri: String? = null, fileName: String? = null, mimeType: String? = null,
+        fileSize: Int? = null, duration: Int? = null, width: Int? = null, height: Int? = null,
+        thumbnailUri: String? = null, thumbnailMimeType: String? = null,
+        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null
+    ): String {
+        val mediaTypes = listOf("m.image", "m.audio", "m.video", "m.file")
+        if (msgtype in mediaTypes && fileUri != null && fileName != null && mimeType != null) {
+            sendMedia(
+                roomId, msgtype, fileUri, fileName, mimeType,
+                fileSize, duration, width, height,
+                caption = body, inReplyTo = replyToEventId,
+                thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
+                thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
+            )
+            return ""
+        }
+        // Text reply
         val room = requireRoom(roomId)
         val timeline = getOrCreateTimeline(room)
         val content = messageEventContentFromMarkdown(body)
@@ -2015,12 +2128,31 @@ private fun serializeLatestEventValue(value: LatestEventValue, roomId: String): 
             when (val kind = content.content.kind) {
                 is MsgLikeKind.Message -> {
                     contentDict["body"] = kind.content.body
-                    when (kind.content.msgType) {
+                    when (val msgType = kind.content.msgType) {
                         is MessageType.Text -> contentDict["msgtype"] = "m.text"
-                        is MessageType.Image -> contentDict["msgtype"] = "m.image"
-                        is MessageType.File -> contentDict["msgtype"] = "m.file"
-                        is MessageType.Audio -> contentDict["msgtype"] = "m.audio"
-                        is MessageType.Video -> contentDict["msgtype"] = "m.video"
+                        is MessageType.Image -> {
+                            contentDict["msgtype"] = "m.image"
+                            extractMediaUrl(msgType.content.source, contentDict)
+                            extractImageInfo(msgType.content, contentDict)
+                        }
+                        is MessageType.File -> {
+                            contentDict["msgtype"] = "m.file"
+                            contentDict["filename"] = msgType.content.filename
+                            extractMediaUrl(msgType.content.source, contentDict)
+                            extractFileInfo(msgType.content, contentDict)
+                        }
+                        is MessageType.Audio -> {
+                            contentDict["msgtype"] = "m.audio"
+                            contentDict["filename"] = msgType.content.filename
+                            extractMediaUrl(msgType.content.source, contentDict)
+                            extractAudioInfo(msgType.content, contentDict)
+                        }
+                        is MessageType.Video -> {
+                            contentDict["msgtype"] = "m.video"
+                            contentDict["filename"] = msgType.content.filename
+                            extractMediaUrl(msgType.content.source, contentDict)
+                            extractVideoInfo(msgType.content, contentDict)
+                        }
                         is MessageType.Emote -> contentDict["msgtype"] = "m.emote"
                         is MessageType.Notice -> contentDict["msgtype"] = "m.notice"
                         else -> contentDict["msgtype"] = "m.text"
@@ -2088,6 +2220,65 @@ private fun extractMediaUrl(source: MediaSource, contentDict: MutableMap<String,
     }
 }
 
+private fun extractThumbnailFields(source: MediaSource?, info: ThumbnailInfo?): Map<String, Any?>? {
+    val src = source ?: return null
+    val thumbUrl = src.url()
+    if (thumbUrl.isEmpty()) return null
+    val result = mutableMapOf<String, Any?>("thumbnail_url" to thumbUrl)
+    val thumbInfo = mutableMapOf<String, Any?>()
+    if (info != null) {
+        info.mimetype?.let { thumbInfo["mimetype"] = it }
+        info.size?.let { thumbInfo["size"] = it.toLong() }
+        info.width?.let { thumbInfo["w"] = it.toLong() }
+        info.height?.let { thumbInfo["h"] = it.toLong() }
+    }
+    if (thumbInfo.isNotEmpty()) {
+        result["thumbnail_info"] = thumbInfo
+    }
+    return result
+}
+
+private fun extractImageInfo(content: ImageMessageContent, contentDict: MutableMap<String, Any?>) {
+    val info = content.info ?: return
+    val infoDict = mutableMapOf<String, Any?>()
+    info.mimetype?.let { infoDict["mimetype"] = it }
+    info.size?.let { infoDict["size"] = it.toLong() }
+    info.width?.let { infoDict["w"] = it.toLong() }
+    info.height?.let { infoDict["h"] = it.toLong() }
+    extractThumbnailFields(info.thumbnailSource, info.thumbnailInfo)?.forEach { (k, v) -> infoDict[k] = v }
+    contentDict["info"] = infoDict
+}
+
+private fun extractVideoInfo(content: VideoMessageContent, contentDict: MutableMap<String, Any?>) {
+    val info = content.info ?: return
+    val infoDict = mutableMapOf<String, Any?>()
+    info.mimetype?.let { infoDict["mimetype"] = it }
+    info.size?.let { infoDict["size"] = it.toLong() }
+    info.width?.let { infoDict["w"] = it.toLong() }
+    info.height?.let { infoDict["h"] = it.toLong() }
+    info.duration?.let { infoDict["duration"] = it.toMillis() }
+    extractThumbnailFields(info.thumbnailSource, info.thumbnailInfo)?.forEach { (k, v) -> infoDict[k] = v }
+    contentDict["info"] = infoDict
+}
+
+private fun extractAudioInfo(content: AudioMessageContent, contentDict: MutableMap<String, Any?>) {
+    val info = content.info ?: return
+    val infoDict = mutableMapOf<String, Any?>()
+    info.mimetype?.let { infoDict["mimetype"] = it }
+    info.size?.let { infoDict["size"] = it.toLong() }
+    info.duration?.let { infoDict["duration"] = it.toMillis() }
+    contentDict["info"] = infoDict
+}
+
+private fun extractFileInfo(content: FileMessageContent, contentDict: MutableMap<String, Any?>) {
+    val info = content.info ?: return
+    val infoDict = mutableMapOf<String, Any?>()
+    info.mimetype?.let { infoDict["mimetype"] = it }
+    info.size?.let { infoDict["size"] = it.toLong() }
+    extractThumbnailFields(info.thumbnailSource, info.thumbnailInfo)?.forEach { (k, v) -> infoDict[k] = v }
+    contentDict["info"] = infoDict
+}
+
 private fun serializeTimelineItem(item: TimelineItem, roomId: String): Map<String, Any?>? {
     val eventItem = item.asEvent() ?: return null
     return serializeEventTimelineItem(eventItem, roomId)
@@ -2110,21 +2301,25 @@ private fun serializeEventTimelineItem(eventItem: EventTimelineItem, roomId: Str
                         is MessageType.Image -> {
                             contentDict["msgtype"] = "m.image"
                             extractMediaUrl(msgType.content.source, contentDict)
+                            extractImageInfo(msgType.content, contentDict)
                         }
                         is MessageType.File -> {
                             contentDict["msgtype"] = "m.file"
                             contentDict["filename"] = msgType.content.filename
                             extractMediaUrl(msgType.content.source, contentDict)
+                            extractFileInfo(msgType.content, contentDict)
                         }
                         is MessageType.Audio -> {
                             contentDict["msgtype"] = "m.audio"
                             contentDict["filename"] = msgType.content.filename
                             extractMediaUrl(msgType.content.source, contentDict)
+                            extractAudioInfo(msgType.content, contentDict)
                         }
                         is MessageType.Video -> {
                             contentDict["msgtype"] = "m.video"
                             contentDict["filename"] = msgType.content.filename
                             extractMediaUrl(msgType.content.source, contentDict)
+                            extractVideoInfo(msgType.content, contentDict)
                         }
                         is MessageType.Emote -> contentDict["msgtype"] = "m.emote"
                         is MessageType.Notice -> contentDict["msgtype"] = "m.notice"

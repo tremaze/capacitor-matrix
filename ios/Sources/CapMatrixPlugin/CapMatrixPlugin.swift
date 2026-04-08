@@ -264,13 +264,19 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         let duration = call.getInt("duration")
         let width = call.getInt("width")
         let height = call.getInt("height")
+        let thumbnailUri = call.getString("thumbnailUri")
+        let thumbnailMimeType = call.getString("thumbnailMimeType")
+        let thumbnailWidth = call.getInt("thumbnailWidth")
+        let thumbnailHeight = call.getInt("thumbnailHeight")
 
         Task {
             do {
                 let eventId = try await matrixBridge.sendMessage(
                     roomId: roomId, body: body, msgtype: msgtype,
                     fileUri: fileUri, fileName: fileName, mimeType: mimeType,
-                    fileSize: fileSize, duration: duration, width: width, height: height
+                    fileSize: fileSize, duration: duration, width: width, height: height,
+                    thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
+                    thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
                 )
                 call.resolve(["eventId": eventId])
             } catch {
@@ -743,6 +749,10 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         _ = call.getInt("duration")
         _ = call.getInt("width")
         _ = call.getInt("height")
+        _ = call.getString("thumbnailUri")
+        _ = call.getString("thumbnailMimeType")
+        _ = call.getInt("thumbnailWidth")
+        _ = call.getInt("thumbnailHeight")
 
         Task {
             do {
@@ -761,14 +771,27 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters")
         }
         let msgtype = call.getString("msgtype") ?? "m.text"
-        // Media info fields — consumed by the bridge when media sending is fully implemented
-        _ = call.getInt("duration")
-        _ = call.getInt("width")
-        _ = call.getInt("height")
+        let fileUri = call.getString("fileUri")
+        let fileName = call.getString("fileName")
+        let mimeType = call.getString("mimeType")
+        let fileSize = call.getInt("fileSize")
+        let duration = call.getInt("duration")
+        let width = call.getInt("width")
+        let height = call.getInt("height")
+        let thumbnailUri = call.getString("thumbnailUri")
+        let thumbnailMimeType = call.getString("thumbnailMimeType")
+        let thumbnailWidth = call.getInt("thumbnailWidth")
+        let thumbnailHeight = call.getInt("thumbnailHeight")
 
         Task {
             do {
-                let resultEventId = try await matrixBridge.sendReply(roomId: roomId, body: body, replyToEventId: replyToEventId, msgtype: msgtype)
+                let resultEventId = try await matrixBridge.sendReply(
+                    roomId: roomId, body: body, replyToEventId: replyToEventId, msgtype: msgtype,
+                    fileUri: fileUri, fileName: fileName, mimeType: mimeType,
+                    fileSize: fileSize, duration: duration, width: width, height: height,
+                    thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
+                    thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
+                )
                 call.resolve(["eventId": resultEventId])
             } catch {
                 call.reject(error.localizedDescription)

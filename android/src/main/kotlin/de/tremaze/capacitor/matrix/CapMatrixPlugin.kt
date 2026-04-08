@@ -296,13 +296,19 @@ class CapMatrixPlugin : Plugin() {
         val duration = call.getInt("duration")
         val width = call.getInt("width")
         val height = call.getInt("height")
+        val thumbnailUri = call.getString("thumbnailUri")
+        val thumbnailMimeType = call.getString("thumbnailMimeType")
+        val thumbnailWidth = call.getInt("thumbnailWidth")
+        val thumbnailHeight = call.getInt("thumbnailHeight")
 
         scope.launch {
             try {
                 val eventId = matrixBridge.sendMessage(
                     roomId, body, msgtype,
                     fileUri = fileUri, fileName = fileName, mimeType = mimeType,
-                    fileSize = fileSize, duration = duration, width = width, height = height
+                    fileSize = fileSize, duration = duration, width = width, height = height,
+                    thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
+                    thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
                 )
                 call.resolve(JSObject().put("eventId", eventId))
             } catch (e: Exception) {
@@ -324,6 +330,10 @@ class CapMatrixPlugin : Plugin() {
         @Suppress("UNUSED_VARIABLE") val duration = call.getInt("duration")
         @Suppress("UNUSED_VARIABLE") val width = call.getInt("width")
         @Suppress("UNUSED_VARIABLE") val height = call.getInt("height")
+        @Suppress("UNUSED_VARIABLE") val thumbnailUri = call.getString("thumbnailUri")
+        @Suppress("UNUSED_VARIABLE") val thumbnailMimeType = call.getString("thumbnailMimeType")
+        @Suppress("UNUSED_VARIABLE") val thumbnailWidth = call.getInt("thumbnailWidth")
+        @Suppress("UNUSED_VARIABLE") val thumbnailHeight = call.getInt("thumbnailHeight")
 
         scope.launch {
             try {
@@ -344,14 +354,27 @@ class CapMatrixPlugin : Plugin() {
         val replyToEventId = call.getString("replyToEventId")
             ?: return call.reject("Missing replyToEventId")
         val msgtype = call.getString("msgtype") ?: "m.text"
-        // Media info fields — consumed by the bridge when media sending is fully implemented
-        @Suppress("UNUSED_VARIABLE") val duration = call.getInt("duration")
-        @Suppress("UNUSED_VARIABLE") val width = call.getInt("width")
-        @Suppress("UNUSED_VARIABLE") val height = call.getInt("height")
+        val fileUri = call.getString("fileUri")
+        val fileName = call.getString("fileName")
+        val mimeType = call.getString("mimeType")
+        val fileSize = call.getInt("fileSize")
+        val duration = call.getInt("duration")
+        val width = call.getInt("width")
+        val height = call.getInt("height")
+        val thumbnailUri = call.getString("thumbnailUri")
+        val thumbnailMimeType = call.getString("thumbnailMimeType")
+        val thumbnailWidth = call.getInt("thumbnailWidth")
+        val thumbnailHeight = call.getInt("thumbnailHeight")
 
         scope.launch {
             try {
-                val resultEventId = matrixBridge.sendReply(roomId, body, replyToEventId, msgtype)
+                val resultEventId = matrixBridge.sendReply(
+                    roomId, body, replyToEventId, msgtype,
+                    fileUri = fileUri, fileName = fileName, mimeType = mimeType,
+                    fileSize = fileSize, duration = duration, width = width, height = height,
+                    thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
+                    thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
+                )
                 call.resolve(JSObject().put("eventId", resultEventId))
             } catch (e: Exception) {
                 call.reject(e.message ?: "sendReply failed", e)
