@@ -370,6 +370,7 @@ The full API reference is auto-generated below from the TypeScript definitions.
 * [`addListener('typingChanged', ...)`](#addlistenertypingchanged-)
 * [`addListener('receiptReceived', ...)`](#addlistenerreceiptreceived-)
 * [`addListener('presenceChanged', ...)`](#addlistenerpresencechanged-)
+* [`addListener('uploadProgress', ...)`](#addlisteneruploadprogress-)
 * [`updateAccessToken(...)`](#updateaccesstoken)
 * [`addListener('tokenRefreshRequired', ...)`](#addlistenertokenrefreshrequired-)
 * [`removeAllListeners()`](#removealllisteners)
@@ -1157,6 +1158,22 @@ addListener(event: 'presenceChanged', listenerFunc: (data: PresenceChangedEvent)
 --------------------
 
 
+### addListener('uploadProgress', ...)
+
+```typescript
+addListener(event: 'uploadProgress', listenerFunc: (data: UploadProgressEvent) => void) => Promise<PluginListenerHandle>
+```
+
+| Param              | Type                                                                                   |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| **`event`**        | <code>'uploadProgress'</code>                                                          |
+| **`listenerFunc`** | <code>(data: <a href="#uploadprogressevent">UploadProgressEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
 ### updateAccessToken(...)
 
 ```typescript
@@ -1502,6 +1519,14 @@ removeAllListeners() => Promise<void>
 | -------------- | ----------------------------------------------------- |
 | **`userId`**   | <code>string</code>                                   |
 | **`presence`** | <code><a href="#presenceinfo">PresenceInfo</a></code> |
+
+
+#### UploadProgressEvent
+
+| Prop           | Type                | Description                     |
+| -------------- | ------------------- | ------------------------------- |
+| **`roomId`**   | <code>string</code> |                                 |
+| **`progress`** | <code>number</code> | Upload progress from 0.0 to 1.0 |
 
 
 ### Type Aliases

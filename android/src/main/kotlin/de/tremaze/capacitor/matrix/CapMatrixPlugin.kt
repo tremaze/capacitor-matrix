@@ -301,6 +301,11 @@ class CapMatrixPlugin : Plugin() {
         val thumbnailWidth = call.getInt("thumbnailWidth")
         val thumbnailHeight = call.getInt("thumbnailHeight")
 
+        val onProgress: (Double) -> Unit = { progress ->
+            notifyListeners("uploadProgress",
+                JSObject().put("roomId", roomId).put("progress", progress))
+        }
+
         scope.launch {
             try {
                 val eventId = matrixBridge.sendMessage(
@@ -308,7 +313,8 @@ class CapMatrixPlugin : Plugin() {
                     fileUri = fileUri, fileName = fileName, mimeType = mimeType,
                     fileSize = fileSize, duration = duration, width = width, height = height,
                     thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
-                    thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
+                    thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight,
+                    onProgress = onProgress
                 )
                 call.resolve(JSObject().put("eventId", eventId))
             } catch (e: Exception) {
@@ -366,6 +372,11 @@ class CapMatrixPlugin : Plugin() {
         val thumbnailWidth = call.getInt("thumbnailWidth")
         val thumbnailHeight = call.getInt("thumbnailHeight")
 
+        val onProgress: (Double) -> Unit = { progress ->
+            notifyListeners("uploadProgress",
+                JSObject().put("roomId", roomId).put("progress", progress))
+        }
+
         scope.launch {
             try {
                 val resultEventId = matrixBridge.sendReply(
@@ -373,7 +384,8 @@ class CapMatrixPlugin : Plugin() {
                     fileUri = fileUri, fileName = fileName, mimeType = mimeType,
                     fileSize = fileSize, duration = duration, width = width, height = height,
                     thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
-                    thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
+                    thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight,
+                    onProgress = onProgress
                 )
                 call.resolve(JSObject().put("eventId", resultEventId))
             } catch (e: Exception) {

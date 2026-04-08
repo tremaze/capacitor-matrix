@@ -1018,7 +1018,8 @@ class CapMatrix(private val context: Context) {
         fileUri: String? = null, fileName: String? = null, mimeType: String? = null,
         fileSize: Int? = null, duration: Int? = null, width: Int? = null, height: Int? = null,
         thumbnailUri: String? = null, thumbnailMimeType: String? = null,
-        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null
+        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null,
+        onProgress: (Double) -> Unit = {}
     ): String {
         val mediaTypes = listOf("m.image", "m.audio", "m.video", "m.file")
         if (msgtype in mediaTypes && fileUri != null && fileName != null && mimeType != null) {
@@ -1027,7 +1028,8 @@ class CapMatrix(private val context: Context) {
                 fileSize, duration, width, height,
                 caption = body, inReplyTo = null,
                 thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
-                thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
+                thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight,
+                onProgress = onProgress
             )
             return ""
         }
@@ -1045,7 +1047,8 @@ class CapMatrix(private val context: Context) {
         fileSize: Int?, duration: Int?, width: Int?, height: Int?,
         caption: String?, inReplyTo: String?,
         thumbnailUri: String? = null, thumbnailMimeType: String? = null,
-        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null
+        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null,
+        onProgress: (Double) -> Unit = {}
     ) {
         Log.d(TAG, "sendMedia: msgtype=$msgtype mimeType=$mimeType fileName=$fileName fileUri=${fileUri.take(80)}")
 
@@ -1068,14 +1071,42 @@ class CapMatrix(private val context: Context) {
         }
         Log.d(TAG, "sendMedia: read ${fileBytes.size} bytes")
 
-        // Upload raw bytes to the media server — bypasses the Rust SDK's image-decoding
-        // validation in sendImage/sendVideo/sendAudio which throws InvalidAttachmentData
-        // for image formats the Rust `image` crate cannot decode (e.g. HEIC, some JPEGs).
-        val c = client ?: throw MatrixBridgeError.NotLoggedIn()
-        val mxcUrl = c.uploadMedia(mimeType, fileBytes, null)
+        // Upload raw bytes to the media server with progress tracking — bypasses the Rust
+        // SDK's image-decoding validation in sendImage/sendVideo/sendAudio which throws
+        // InvalidAttachmentData for image formats the Rust `image` crate cannot decode
+        // (e.g. HEIC, some JPEGs).
+        onProgress(0.0)
+        val session = sessionStore.load() ?: throw MatrixBridgeError.NotLoggedIn()
+        val uploadBaseUrl = session.homeserverUrl.trimEnd('/')
+        val encodedUploadFileName = URLEncoder.encode(fileName, "UTF-8")
+        val uploadUrl = URL("$uploadBaseUrl/_matrix/media/v3/upload?filename=$encodedUploadFileName")
+        val uploadConn = uploadUrl.openConnection() as HttpURLConnection
+        uploadConn.requestMethod = "POST"
+        uploadConn.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+        uploadConn.setRequestProperty("Content-Type", mimeType)
+        uploadConn.doOutput = true
+        uploadConn.setFixedLengthStreamingMode(fileBytes.size)
+        uploadConn.outputStream.use { os ->
+            val chunkSize = 65536
+            var bytesSent = 0
+            while (bytesSent < fileBytes.size) {
+                val end = minOf(bytesSent + chunkSize, fileBytes.size)
+                os.write(fileBytes, bytesSent, end - bytesSent)
+                bytesSent = end
+                onProgress(bytesSent.toDouble() / fileBytes.size.toDouble())
+            }
+        }
+        val uploadResponseCode = uploadConn.responseCode
+        if (uploadResponseCode < 200 || uploadResponseCode >= 300) {
+            val errorBody = uploadConn.errorStream?.bufferedReader()?.readText() ?: ""
+            throw MatrixBridgeError.Custom("Upload failed with status $uploadResponseCode: $errorBody")
+        }
+        val uploadResponseBody = uploadConn.inputStream.bufferedReader().readText()
+        val mxcUrl = JSONObject(uploadResponseBody).getString("content_uri")
         Log.d(TAG, "sendMedia: uploaded, mxcUrl=$mxcUrl")
 
-        // Upload thumbnail if provided
+        // Upload thumbnail if provided (no progress tracking — thumbnails are small)
+        val c = client ?: throw MatrixBridgeError.NotLoggedIn()
         var thumbnailMxcUrl: String? = null
         var thumbnailSizeBytes: Int? = null
         if (thumbnailUri != null && thumbnailMimeType != null) {
@@ -1103,8 +1134,7 @@ class CapMatrix(private val context: Context) {
 
         // Build Matrix event content as JSON (bypasses Rust SDK serialization
         // which may not include thumbnail fields in the final event)
-        val session = sessionStore.load() ?: throw MatrixBridgeError.NotLoggedIn()
-        val baseUrl = session.homeserverUrl.trimEnd('/')
+        val baseUrl = uploadBaseUrl
 
         val info = JSONObject()
         info.put("mimetype", mimeType)
@@ -1177,7 +1207,8 @@ class CapMatrix(private val context: Context) {
         fileUri: String? = null, fileName: String? = null, mimeType: String? = null,
         fileSize: Int? = null, duration: Int? = null, width: Int? = null, height: Int? = null,
         thumbnailUri: String? = null, thumbnailMimeType: String? = null,
-        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null
+        thumbnailWidth: Int? = null, thumbnailHeight: Int? = null,
+        onProgress: (Double) -> Unit = {}
     ): String {
         val mediaTypes = listOf("m.image", "m.audio", "m.video", "m.file")
         if (msgtype in mediaTypes && fileUri != null && fileName != null && mimeType != null) {
@@ -1186,7 +1217,8 @@ class CapMatrix(private val context: Context) {
                 fileSize, duration, width, height,
                 caption = body, inReplyTo = replyToEventId,
                 thumbnailUri = thumbnailUri, thumbnailMimeType = thumbnailMimeType,
-                thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight
+                thumbnailWidth = thumbnailWidth, thumbnailHeight = thumbnailHeight,
+                onProgress = onProgress
             )
             return ""
         }

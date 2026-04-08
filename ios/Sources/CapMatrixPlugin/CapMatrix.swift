@@ -1017,7 +1017,8 @@ class MatrixSDKBridge {
         fileUri: String? = nil, fileName: String? = nil, mimeType: String? = nil,
         fileSize: Int? = nil, duration: Int? = nil, width: Int? = nil, height: Int? = nil,
         thumbnailUri: String? = nil, thumbnailMimeType: String? = nil,
-        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil
+        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil,
+        onProgress: @escaping (Double) -> Void = { _ in }
     ) async throws -> String {
         let mediaTypes = ["m.image", "m.audio", "m.video", "m.file"]
         if mediaTypes.contains(msgtype), let fileUri = fileUri, let fileName = fileName, let mimeType = mimeType {
@@ -1027,7 +1028,8 @@ class MatrixSDKBridge {
                 fileSize: fileSize, duration: duration, width: width, height: height,
                 caption: body, inReplyTo: nil,
                 thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
-                thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
+                thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight,
+                onProgress: onProgress
             )
             return ""
         }
@@ -1053,7 +1055,8 @@ class MatrixSDKBridge {
         fileSize: Int?, duration: Int?, width: Int?, height: Int?,
         caption: String?, inReplyTo: String?,
         thumbnailUri: String? = nil, thumbnailMimeType: String? = nil,
-        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil
+        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil,
+        onProgress: @escaping (Double) -> Void = { _ in }
     ) async throws {
         print("[CapMatrix] sendMedia: msgtype=\(msgtype) mimeType=\(mimeType) fileName=\(fileName) fileUri=\(String(fileUri.prefix(80)))")
 
@@ -1082,7 +1085,8 @@ class MatrixSDKBridge {
             ? String(session.homeserverUrl.dropLast())
             : session.homeserverUrl
 
-        // 2. Upload to media server
+        // 2. Upload to media server with progress tracking
+        onProgress(0.0)
         let encodedFileName = fileName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? fileName
         guard let uploadUrl = URL(string: "\(baseUrl)/_matrix/media/v3/upload?filename=\(encodedFileName)") else {
             throw MatrixBridgeError.notSupported("Invalid upload URL")
@@ -1091,9 +1095,9 @@ class MatrixSDKBridge {
         uploadRequest.httpMethod = "POST"
         uploadRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
         uploadRequest.setValue(mimeType, forHTTPHeaderField: "Content-Type")
-        uploadRequest.httpBody = fileData
 
-        let (uploadData, uploadResponse) = try await URLSession.shared.data(for: uploadRequest)
+        let progressDelegate = UploadProgressDelegate(onProgress: onProgress)
+        let (uploadData, uploadResponse) = try await URLSession.shared.upload(for: uploadRequest, from: fileData, delegate: progressDelegate)
         let uploadStatus = (uploadResponse as? HTTPURLResponse)?.statusCode ?? -1
         guard uploadStatus >= 200 && uploadStatus < 300 else {
             throw MatrixBridgeError.notSupported("Upload failed with status \(uploadStatus)")
@@ -1220,7 +1224,8 @@ class MatrixSDKBridge {
         fileUri: String? = nil, fileName: String? = nil, mimeType: String? = nil,
         fileSize: Int? = nil, duration: Int? = nil, width: Int? = nil, height: Int? = nil,
         thumbnailUri: String? = nil, thumbnailMimeType: String? = nil,
-        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil
+        thumbnailWidth: Int? = nil, thumbnailHeight: Int? = nil,
+        onProgress: @escaping (Double) -> Void = { _ in }
     ) async throws -> String {
         let room = try requireRoom(roomId: roomId)
         let timeline = try await getOrCreateTimeline(room: room)
@@ -1233,7 +1238,8 @@ class MatrixSDKBridge {
                 fileSize: fileSize, duration: duration, width: width, height: height,
                 caption: body, inReplyTo: replyToEventId,
                 thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
-                thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
+                thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight,
+                onProgress: onProgress
             )
             return ""
         }
@@ -3050,5 +3056,19 @@ private actor AsyncSemaphore {
             let waiter = waiters.removeFirst()
             waiter.resume()
         }
+    }
+}
+
+// MARK: - Upload progress delegate for URLSession
+
+private class UploadProgressDelegate: NSObject, URLSessionTaskDelegate {
+    let onProgress: (Double) -> Void
+    init(onProgress: @escaping (Double) -> Void) { self.onProgress = onProgress }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
+                    totalBytesExpectedToSend: Int64) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        onProgress(Double(totalBytesSent) / Double(totalBytesExpectedToSend))
     }
 }

@@ -38,6 +38,7 @@ import type {
   RecoveryKeyInfo,
   PresenceInfo,
   UserProfile,
+  UploadProgressEvent,
 } from './definitions';
 
 const SESSION_KEY = 'matrix_session';
@@ -526,6 +527,51 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
 
   // ── Thumbnail helper ────────────────────────────────────
 
+  private uploadContentWithProgress(
+    blob: Blob,
+    roomId: string,
+    mimeType?: string,
+    fileName?: string,
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const baseUrl = this.client!.getHomeserverUrl().replace(/\/$/, '');
+      const accessToken = this.client!.getAccessToken();
+      const params = new URLSearchParams();
+      if (fileName) params.set('filename', fileName);
+      const url = `${baseUrl}/_matrix/media/v3/upload?${params.toString()}`;
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
+      if (mimeType) xhr.setRequestHeader('Content-Type', mimeType);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          this.notifyListeners('uploadProgress', {
+            roomId,
+            progress: e.loaded / e.total,
+          } satisfies UploadProgressEvent);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const json = JSON.parse(xhr.responseText);
+            resolve(json.content_uri);
+          } catch {
+            reject(new Error('Invalid upload response'));
+          }
+        } else {
+          reject(new Error(`Upload failed with status ${xhr.status}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('Upload network error'));
+      xhr.send(blob);
+    });
+  }
+
   private async uploadThumbnail(
     options: { thumbnailUri?: string; thumbnailMimeType?: string; thumbnailWidth?: number; thumbnailHeight?: number },
   ): Promise<{ thumbnail_url: string; thumbnail_info: Record<string, unknown> } | null> {
@@ -558,11 +604,7 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       // Media message: upload file then send
       const response = await fetch(options.fileUri);
       const blob = await response.blob();
-      const uploadRes = await this.client!.uploadContent(blob, {
-        name: options.fileName,
-        type: options.mimeType,
-      });
-      const mxcUrl = uploadRes.content_uri;
+      const mxcUrl = await this.uploadContentWithProgress(blob, options.roomId, options.mimeType, options.fileName);
       const thumb = await this.uploadThumbnail(options);
       const content: Record<string, unknown> = {
         msgtype,
@@ -606,15 +648,12 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
     if (mediaTypes.includes(msgtype) && options.fileUri) {
       const response = await fetch(options.fileUri);
       const blob = await response.blob();
-      const uploadRes = await this.client!.uploadContent(blob, {
-        name: options.fileName,
-        type: options.mimeType,
-      });
+      const mxcUrl = await this.uploadContentWithProgress(blob, options.roomId, options.mimeType, options.fileName);
       const thumb = await this.uploadThumbnail(options);
       newContent = {
         msgtype,
         body: options.newBody || options.fileName || 'file',
-        url: uploadRes.content_uri,
+        url: mxcUrl,
         info: {
           mimetype: options.mimeType,
           size: options.fileSize ?? blob.size,
@@ -656,15 +695,12 @@ export class MatrixWeb extends WebPlugin implements MatrixPlugin {
       // Media reply: upload file then send with reply relation
       const response = await fetch(options.fileUri);
       const blob = await response.blob();
-      const uploadRes = await this.client!.uploadContent(blob, {
-        name: options.fileName,
-        type: options.mimeType,
-      });
+      const mxcUrl = await this.uploadContentWithProgress(blob, options.roomId, options.mimeType, options.fileName);
       const thumb = await this.uploadThumbnail(options);
       content = {
         msgtype,
         body: options.body || options.fileName || 'file',
-        url: uploadRes.content_uri,
+        url: mxcUrl,
         info: {
           mimetype: options.mimeType,
           size: options.fileSize ?? blob.size,

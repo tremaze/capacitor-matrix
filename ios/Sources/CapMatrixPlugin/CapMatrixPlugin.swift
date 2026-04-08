@@ -269,6 +269,13 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         let thumbnailWidth = call.getInt("thumbnailWidth")
         let thumbnailHeight = call.getInt("thumbnailHeight")
 
+        let onProgress: (Double) -> Void = { [weak self] progress in
+            self?.notifyListeners("uploadProgress", data: [
+                "roomId": roomId,
+                "progress": progress
+            ])
+        }
+
         Task {
             do {
                 let eventId = try await matrixBridge.sendMessage(
@@ -276,7 +283,8 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
                     fileUri: fileUri, fileName: fileName, mimeType: mimeType,
                     fileSize: fileSize, duration: duration, width: width, height: height,
                     thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
-                    thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
+                    thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight,
+                    onProgress: onProgress
                 )
                 call.resolve(["eventId": eventId])
             } catch {
@@ -783,6 +791,13 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
         let thumbnailWidth = call.getInt("thumbnailWidth")
         let thumbnailHeight = call.getInt("thumbnailHeight")
 
+        let onProgress: (Double) -> Void = { [weak self] progress in
+            self?.notifyListeners("uploadProgress", data: [
+                "roomId": roomId,
+                "progress": progress
+            ])
+        }
+
         Task {
             do {
                 let resultEventId = try await matrixBridge.sendReply(
@@ -790,7 +805,8 @@ public class MatrixPlugin: CAPPlugin, CAPBridgedPlugin {
                     fileUri: fileUri, fileName: fileName, mimeType: mimeType,
                     fileSize: fileSize, duration: duration, width: width, height: height,
                     thumbnailUri: thumbnailUri, thumbnailMimeType: thumbnailMimeType,
-                    thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight
+                    thumbnailWidth: thumbnailWidth, thumbnailHeight: thumbnailHeight,
+                    onProgress: onProgress
                 )
                 call.resolve(["eventId": resultEventId])
             } catch {

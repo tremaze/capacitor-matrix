@@ -74,6 +74,12 @@ export interface PresenceChangedEvent {
   presence: PresenceInfo;
 }
 
+export interface UploadProgressEvent {
+  roomId: string;
+  /** Upload progress from 0.0 to 1.0 */
+  progress: number;
+}
+
 // Edit & Reply
 
 export interface EditMessageOptions {
@@ -438,6 +444,10 @@ export interface MatrixPlugin {
   addListener(
     event: 'presenceChanged',
     listenerFunc: (data: PresenceChangedEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    event: 'uploadProgress',
+    listenerFunc: (data: UploadProgressEvent) => void,
   ): Promise<PluginListenerHandle>;
   // Token Refresh
   updateAccessToken(options: { accessToken: string }): Promise<void>;
